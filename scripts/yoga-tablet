@@ -605,8 +605,8 @@ def digitizer_names() -> list[str]:
     return names
 
 
-def pointer_names() -> list[str]:
-    """Built-in touchpad and the laptop's own keyboard."""
+def touchpad_names() -> list[str]:
+    """Touchpads whose relative pointer axes should follow display rotation."""
     devices = hyprctl_json("devices")
     if not devices:
         return []
@@ -615,6 +615,15 @@ def pointer_names() -> list[str]:
         name = dev.get("name") or ""
         if "touchpad" in name.lower():
             names.append(name)
+    return names
+
+
+def pointer_names() -> list[str]:
+    """Built-in touchpad and the laptop's own keyboard."""
+    devices = hyprctl_json("devices")
+    if not devices:
+        return []
+    names = touchpad_names()
     keyboards = devices.get("keyboards") or []
     for dev in keyboards:
         name = dev.get("name") or ""
@@ -1407,6 +1416,9 @@ class Daemon:
         self._keyboard_original_frame: tuple[str, int] | None = None
         self.rotation_locked = False
         self.transform = self._current_transform()
+        # A fresh compositor/input enumeration can reset relative pointer
+        # rotation. Reconcile the built-in touchpad with the inherited display.
+        self._sync_touchpad_rotation(self.transform, reason="startup")
         write_capture_transform(self.transform)
         # Start from the compositor's real state. Otherwise an unlock shortly
         # after daemon startup can use the synthetic "normal" value and undo a
@@ -1428,6 +1440,27 @@ class Daemon:
         except (TypeError, ValueError):
             return NORMAL
 
+    def _touchpad_rotation_lines(self, transform: int) -> list[str]:
+        """Return native Hyprland pointer rotation updates for touchpads."""
+        degrees = (transform % 4) * 90
+        return [
+            f"hl.device({{ name = {lua_str(dev)}, rotation = {degrees} }})"
+            for dev in touchpad_names()
+        ]
+
+    def _sync_touchpad_rotation(self, transform: int, reason: str = "") -> bool:
+        lines = self._touchpad_rotation_lines(transform)
+        if not lines:
+            return True
+        if not hypr_eval_lua("\n".join(lines) + "\n"):
+            log("could not align touchpad rotation with display")
+            return False
+        log(
+            f"touchpad rotation -> {(transform % 4) * 90} deg"
+            f"{' (' + reason + ')' if reason else ''}"
+        )
+        return True
+
     def apply_transform(self, transform: int, reason: str = "") -> str | None:
         transform %= 4
         mon = pick_monitor(self.cfg)
@@ -1446,12 +1479,14 @@ class Daemon:
                 t=transform,
             )
         ]
-        # The digitizers are physically bonded to the panel, so they need the
-        # same transform or touch lands in the wrong place once rotated.
+        # Absolute digitizers and relative touchpad motion both follow the
+        # physical panel. Hyprland uses transforms for touch/pen and clockwise
+        # degrees for pointer rotation.
         for dev in digitizer_names():
             lines.append(
                 f"hl.device({{ name = {lua_str(dev)}, transform = {transform} }})"
             )
+        lines.extend(self._touchpad_rotation_lines(transform))
 
         if not hypr_eval_lua("\n".join(lines) + "\n"):
             return "compositor rejected the rotation"
@@ -1486,6 +1521,8 @@ class Daemon:
                     for n in names
                 )
                 if hypr_eval_lua(chunk + "\n"):
+                    if enabled:
+                        self._sync_touchpad_rotation(self.transform, reason="input restore")
                     return
             if attempt + 1 < attempts:
                 time.sleep(0.25)
@@ -1894,6 +1931,7 @@ class Daemon:
                     "orientation": self.orientation,
                     "transform": self.transform,
                     "degrees": self.transform * 90,
+                    "touchpad_rotation_degrees": self.transform * 90,
                     "osk_running": self.osk._alive(),
                     "osk_visible": self.osk.visible,
                     "osk_available": self.osk.available(),
@@ -1922,6 +1960,9 @@ class Daemon:
             with self.lock:
                 if arg == "auto":
                     self.rotation_locked = False
+                    # Auto is a direct user action: sample now so it responds
+                    # to the current physical pose instead of stale poll state.
+                    self.sample_orientation()
                     target = ORIENTATION_TRANSFORM[self.orientation]
                 elif arg == "next":
                     self.rotation_locked = True
@@ -2085,6 +2126,7 @@ class Daemon:
                 self.osk._flags = None
                 self.grab.cfg = self.cfg
                 self.grab.stop()
+                self._sync_touchpad_rotation(self.transform, reason="reload")
                 self.sync_handle()
                 # Settings that change the inherited glide fd or toolbar
                 # environment need a fresh child; preserve visibility.

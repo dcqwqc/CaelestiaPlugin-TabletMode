@@ -1,25 +1,137 @@
 import QtQuick
-import qs.components.controls
+import Caelestia.Config
+import qs.components
 import qs.services
-import dcqwqc.tabletmode.services as RotationLockPlugin
+import dcqwqc.tabletmode.services as RotationPlugin
 
-// The daemon owns the lock and other things flip it (Super+Alt+O, folding the
-// hinge), so this re-reads whenever it comes back on screen rather than polling
-// for a change that almost never happens.
-IconButton {
-    // Hides itself where the tablet-mode daemon is not answering, rather
-    // than sitting there as a dead control on a desktop.
-    visible: RotationLockPlugin.RotationLock.available
-    icon: RotationLockPlugin.RotationLock.locked ? "screen_lock_rotation" : "screen_rotation"
-    checked: RotationLockPlugin.RotationLock.locked
-    onClicked: RotationLockPlugin.RotationLock.toggle()
+// Permanently split rotation control:
+// left = automatic sensor rotation
+// right = force the next 90° orientation and hold it
+StyledRect {
+    id: root
 
-    inactiveColour: Colours.layer(Colours.palette.m3surfaceContainerHighest, 2)
-    fillWidth: true
-    isToggle: true
-    isRound: true
-    shapeMorph: true
+    property bool fillWidth: true
+    property bool shapeMorph: true
+    property real shapeMorphExpansion: 0
+
+    implicitWidth: implicitHeight * 2 + segmentGap
+    implicitHeight: autoIcon.implicitHeight + Tokens.padding.small * 2
+    visible: RotationPlugin.RotationLock.available
+    opacity: RotationPlugin.RotationLock.rotationChanging ? 0.72 : 1
+
+    readonly property bool automatic: !RotationPlugin.RotationLock.locked
+    readonly property int degrees: RotationPlugin.RotationLock.degrees
+    readonly property real outerRadius: Math.min(height / 2, Tokens.rounding.large)
+    readonly property real innerRadius: Math.min(outerRadius, Tokens.rounding.small)
+    readonly property real segmentGap: Math.max(2, Math.round(Tokens.spacing.extraSmall / 2))
+    readonly property real segmentWidth: Math.floor((width - segmentGap) / 2)
+
+    readonly property color selectedColour: Colours.palette.m3primary
+    readonly property color selectedOnColour: Colours.palette.m3onPrimary
+    readonly property color inactiveColour: Colours.layer(Colours.palette.m3surfaceContainerHighest, 2)
+    readonly property color inactiveOnColour: Colours.palette.m3onSurfaceVariant
+
+    radius: outerRadius
+    color: "transparent"
+
+    Behavior on opacity { CAnim {} }
+
+    component SegmentSurface: StyledRect {
+        required property bool first
+        property bool selected: false
+
+        radius: 0
+        topLeftRadius: first ? root.outerRadius : root.innerRadius
+        bottomLeftRadius: first ? root.outerRadius : root.innerRadius
+        topRightRadius: first ? root.innerRadius : root.outerRadius
+        bottomRightRadius: first ? root.innerRadius : root.outerRadius
+        color: selected ? root.selectedColour : root.inactiveColour
+
+        Behavior on color { CAnim {} }
+    }
+
+    SegmentSurface {
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: root.segmentWidth
+        first: true
+        selected: root.automatic
+    }
+
+    SegmentSurface {
+        anchors.left: parent.left
+        anchors.leftMargin: root.segmentWidth + root.segmentGap
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        first: false
+        selected: !root.automatic
+    }
+
+    Item {
+        id: autoAction
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: root.segmentWidth
+
+        StateLayer {
+            color: root.automatic ? root.selectedOnColour : root.inactiveOnColour
+            rect.topLeftRadius: root.outerRadius
+            rect.bottomLeftRadius: root.outerRadius
+            rect.topRightRadius: root.innerRadius
+            rect.bottomRightRadius: root.innerRadius
+            onClicked: {
+                if (!RotationPlugin.RotationLock.rotationChanging)
+                    RotationPlugin.RotationLock.setAutomatic();
+            }
+        }
+
+        MaterialIcon {
+            id: autoIcon
+            anchors.centerIn: parent
+            anchors.verticalCenterOffset: 1
+            text: "screen_rotation"
+            color: root.automatic ? root.selectedOnColour : root.inactiveOnColour
+            fill: root.automatic ? 1 : 0
+            fontStyle: Tokens.font.icon.small
+        }
+    }
+
+    Item {
+        id: forceAction
+        anchors.left: autoAction.right
+        anchors.leftMargin: root.segmentGap
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+
+        StateLayer {
+            color: !root.automatic ? root.selectedOnColour : root.inactiveOnColour
+            rect.topLeftRadius: root.innerRadius
+            rect.bottomLeftRadius: root.innerRadius
+            rect.topRightRadius: root.outerRadius
+            rect.bottomRightRadius: root.outerRadius
+            onClicked: {
+                if (!RotationPlugin.RotationLock.rotationChanging)
+                    RotationPlugin.RotationLock.forceNext();
+            }
+        }
+
+        MaterialIcon {
+            anchors.centerIn: parent
+            anchors.verticalCenterOffset: 1
+            text: "screen_lock_rotation"
+            color: !root.automatic ? root.selectedOnColour : root.inactiveOnColour
+            fill: !root.automatic ? 1 : 0
+            fontStyle: Tokens.font.icon.small
+            rotation: root.degrees
+
+            Behavior on rotation { CAnim {} }
+        }
+    }
 
     onVisibleChanged: if (visible)
-        RotationLockPlugin.RotationLock.refresh()
+        RotationPlugin.RotationLock.refresh()
 }

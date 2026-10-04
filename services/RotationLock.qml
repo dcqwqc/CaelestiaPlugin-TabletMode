@@ -5,34 +5,53 @@ import Quickshell
 import Quickshell.Io
 import qs.utils
 
-// Rotation lock, as owned by the tablet-mode runtime.
-//
-// The daemon is the authority: it also flips the lock from the CLI
-// (Super+Alt+O rotates and latches) and from its own tablet-mode handling, so
-// this never caches a guess -- it re-reads `status` whenever the panel that
-// shows it opens, and again after every write.
+// Rotation state/control, owned by the TabletMode runtime. The daemon remains
+// authoritative so sensor, hotkey, hinge and quick-toggle changes cannot drift.
 Singleton {
     id: root
 
-    // Rotation Lock now lives inside TabletMode. Resolve the daemon relative
-    // to this plugin so the toggle survives any Nexus clone directory name.
     readonly property string bin: Paths.toLocalFile(Qt.resolvedUrl("../scripts/yoga-tablet"))
 
-    // False until a reply actually lands, so the toggle stays hidden on a
-    // machine where the daemon is not installed or not running.
     property bool available: false
     property bool locked: false
     property bool tabletMode: false
     property bool tabletModeChanging: false
+    property bool rotationChanging: false
+    property int transform: 0
+    property int degrees: 0
+    property string autoRotate: "always"
 
     function refresh(): void {
         if (!status.running)
             status.running = true;
     }
 
+    // Compatibility for old callers. The quick toggle itself now exposes
+    // explicit Auto and Force actions instead of one ambiguous lock button.
     function toggle(): void {
         if (!toggler.running)
             toggler.running = true;
+    }
+
+    function runRotationAction(arg): void {
+        if (rotationChanging)
+            return;
+        rotationChanging = true;
+        rotationAction.command = [root.bin, "rotate", String(arg)];
+        rotationAction.running = true;
+    }
+
+    function setAutomatic(): void {
+        runRotationAction("auto");
+    }
+
+    function forceNext(): void {
+        runRotationAction("next");
+    }
+
+    function forceTransform(value): void {
+        let normalized = ((Number(value) % 4) + 4) % 4;
+        runRotationAction(normalized);
     }
 
     function toggleTabletMode(): void {
@@ -43,12 +62,10 @@ Singleton {
         tabletToggler.running = true;
     }
 
-    // `status` is the only subcommand that answers on stdout; the rest report
-    // through the exit code alone, hence the read-back in toggler below.
     Process {
         id: status
-
         command: [root.bin, "status"]
+
         stdout: StdioCollector {
             onStreamFinished: {
                 let data;
@@ -65,10 +82,12 @@ Singleton {
                 root.available = true;
                 root.locked = data.rotation_locked ?? root.locked;
                 root.tabletMode = data.tablet_mode ?? root.tabletMode;
+                root.transform = data.transform ?? root.transform;
+                root.degrees = data.degrees ?? root.degrees;
+                root.autoRotate = data.auto_rotate ?? root.autoRotate;
             }
         }
-        // A missing binary produces no stdout at all, so failure has to clear
-        // the flag on its own.
+
         onExited: code => {
             if (code !== 0)
                 root.available = false;
@@ -77,7 +96,6 @@ Singleton {
 
     Process {
         id: toggler
-
         command: [root.bin, "toggle-lock"]
         onExited: code => {
             if (code === 0)
@@ -88,8 +106,19 @@ Singleton {
     }
 
     Process {
-        id: tabletToggler
+        id: rotationAction
+        running: false
+        onExited: code => {
+            root.rotationChanging = false;
+            if (code === 0)
+                root.refresh();
+            else
+                root.available = false;
+        }
+    }
 
+    Process {
+        id: tabletToggler
         running: false
         onExited: code => {
             root.tabletModeChanging = false;
