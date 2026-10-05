@@ -7,6 +7,7 @@ The plugin provides:
 - tablet-mode state integration for foldable/convertible hardware
 - accelerometer-driven auto-rotation through all four orientations
 - automatic accelerometer rediscovery if the Intel sensor hub disappears and later re-enumerates
+- hardware mount correction for Lenovo Yoga 7 2-in-1 14IML9 (83DJ), whose IIO accelerometer is rotated 90° relative to the panel
 - matching touchscreen and pen transforms
 - only the built-in laptop touchpad rotates with the display through a tiny post-libinput Hyprland motion hook; USB/Bluetooth/virtual pointers stay neutral
 - an always-split Rotation quick control: **Auto** on the left is a real on/off toggle, while the right side shows **0° / 90° / 180° / -90°** and forces the next 90° step

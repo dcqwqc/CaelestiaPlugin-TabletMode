@@ -146,6 +146,24 @@ ORIENTATION_TRANSFORM = {
 }
 TRANSFORM_ORIENTATION = {transform: orientation for orientation, transform in ORIENTATION_TRANSFORM.items()}
 
+# Some convertibles mount the IIO accelerometer rotated relative to the panel.
+# Mirai (Lenovo Yoga 7 2-in-1 14IML9, machine type 83DJ) reports +X gravity in
+# the ordinary landscape laptop pose, i.e. the sensor frame is one quarter-turn
+# behind the display frame.
+SENSOR_MOUNT_QUIRKS = {
+    ("LENOVO", "83DJ"): 1,
+}
+
+
+def sensor_mount_quarters() -> int:
+    try:
+        vendor = (Path("/sys/class/dmi/id/sys_vendor").read_text().strip().upper())
+        product = (Path("/sys/class/dmi/id/product_name").read_text().strip().upper())
+    except OSError:
+        return 0
+    return SENSOR_MOUNT_QUIRKS.get((vendor, product), 0)
+
+
 DEFAULTS = {
     # Which panel to rotate. "auto" picks the first internal (eDP-*) output.
     "monitor": "auto",
@@ -1696,20 +1714,38 @@ class Daemon:
         if abs(z) > flat and abs(x) < thr and abs(y) < thr:
             return self.orientation
 
+        raw_orientation = None
         if abs(y) >= abs(x):
             if y <= -thr:
-                return "normal"
-            if y >= thr:
-                return "bottom-up"
+                raw_orientation = "normal"
+            elif y >= thr:
+                raw_orientation = "bottom-up"
         else:
             # Linux IIO screen coordinates: +X means the right edge is up and
-            # -X means the left edge is up. The old mapping had these reversed,
-            # which made every automatic 90° turn go the opposite direction.
+            # -X means the left edge is up.
             if x >= thr:
-                return "right-up" if not self.cfg.get("invert_sides") else "left-up"
-            if x <= -thr:
-                return "left-up" if not self.cfg.get("invert_sides") else "right-up"
-        return self.orientation
+                raw_orientation = "right-up"
+            elif x <= -thr:
+                raw_orientation = "left-up"
+
+        if raw_orientation is None:
+            return self.orientation
+
+        # Convert from the sensor's physical mounting frame into the panel
+        # frame. This is a device property, not a tablet/laptop-mode policy:
+        # side-lying auto rotation therefore still works in ordinary laptop mode.
+        transform = (
+            ORIENTATION_TRANSFORM[raw_orientation] + sensor_mount_quarters()
+        ) % 4
+        orientation = TRANSFORM_ORIENTATION[transform]
+
+        if self.cfg.get("invert_sides"):
+            if orientation == "left-up":
+                orientation = "right-up"
+            elif orientation == "right-up":
+                orientation = "left-up"
+
+        return orientation
 
     def sample_orientation(self) -> str:
         """Refresh orientation synchronously for user-triggered unlocks."""
@@ -2091,6 +2127,7 @@ class Daemon:
                     "handle_state": self.grab.state,
                     "accelerometer": str(self.accel.base) if self.accel.base else None,
                     "invert_sides": bool(self.cfg.get("invert_sides")),
+                    "sensor_mount_quarters": sensor_mount_quarters(),
                 }
 
         if cmd == "fullscreen":
