@@ -217,9 +217,10 @@ DEFAULTS = {
     # An overlay remains reachable over a true fullscreen window. Do not fake
     # that by changing the application's fullscreen state: doing so couples two
     # independent controls and makes hiding the keyboard alter the window.
-    # Use overlay with explicit Hyprland ordering: above Caelestia drawers,
-    # below the resident OSK toolbar/pager.
-    "osk_layer": "overlay",
+    # Keep wvkbd one layer below the resident toolbar/pager surfaces. If both
+    # use overlay, wvkbd maps later and Hyprland stacks it above the toolbar,
+    # making the bar appear briefly and then vanish underneath the keyboard.
+    "osk_layer": "top",
     # Start it hidden on fold so the first toggle is instant. It stays
     # invisible until something explicitly shows it.
     "osk_preload_in_tablet": True,
@@ -230,9 +231,9 @@ DEFAULTS = {
     # bar (which reserves 60px) and stops well short of the launcher in the
     # centre of the bottom edge.
     "osk_handle_left": 68,
-    "osk_handle_width": 260,
-    "osk_handle_height": 42,
-    "osk_handle_threshold": 14,
+    "osk_handle_width": 190,
+    "osk_handle_height": 26,
+    "osk_handle_threshold": 18,
     # Glide is enabled only when the vendored binary, decoder, lexicon and
     # wtype all validate at runtime. A missing dependency falls back to taps.
     "glide_enabled": True,
@@ -1071,13 +1072,8 @@ class Osk:
         )
 
     def prepare_vertical_show(self, travel: int) -> bool:
-        """Place the hidden keyboard just below the screen before it maps.
-
-        Always reset horizontal paging here. If a keyboard→clipboard/emoji
-        transition is interrupted by closing the OSK, the native surface can
-        otherwise reopen fully shifted off-screen and look completely blank.
-        """
-        return self.set_surface_offset(x=0, y=-max(1, int(travel)))
+        """Place the hidden keyboard just below the screen before it maps."""
+        return self.set_surface_offset(y=-max(1, int(travel)))
 
     def animate_vertical_show(self, travel: int, delay_ms: int = 0) -> bool:
         travel = max(1, int(travel))
@@ -2163,7 +2159,7 @@ class Daemon:
 
     def prepare_osk_show(self) -> int:
         """Prepare one shared vertical OSK+toolbar motion and return its travel."""
-        if not (self.tablet_mode or self.keyboard_override):
+        if not self.tablet_mode:
             return 0
         mon = pick_monitor(self.cfg)
         name = mon.get("name") if mon else None
@@ -2235,12 +2231,10 @@ class Daemon:
                 self.set_pointers_enabled(True, force=True)
                 if not self.keyboard_override:
                     self.osk.stop()
-                elif not self.osk.visible:
-                    # Laptop keyboard override means "available", not permanently
-                    # preloaded. A hidden wvkbd surface can remain mapped as an
-                    # empty keyboard-sized layer on some compositors. Keep it
-                    # fully stopped until the user actually opens it.
-                    self.osk.stop()
+                else:
+                    err = self.osk.start()
+                    if err:
+                        log(err)
                 if not unchanged:
                     mode = str(self.cfg.get("auto_rotate", "always")).strip().lower()
                     if not self.rotation_locked:
@@ -2284,13 +2278,9 @@ class Daemon:
             KEYBOARD_OVERRIDE_PATH.parent.mkdir(parents=True, exist_ok=True)
             KEYBOARD_OVERRIDE_PATH.write_text(("1" if self.keyboard_override else "0") + chr(10), encoding="utf-8")
             if self.keyboard_override:
-                # In laptop mode, keep only the pull handle resident. Starting
-                # wvkbd hidden can leave a blank mapped layer behind. Tablet
-                # mode still owns its normal preload path.
-                if self.tablet_mode:
-                    err = self.osk.start()
-                    if err:
-                        return {"ok": False, "error": err}
+                err = self.osk.start()
+                if err:
+                    return {"ok": False, "error": err}
             elif not self.tablet_mode:
                 if self.osk.visible:
                     self.fit_fullscreen_above_keyboard(False)
@@ -2437,14 +2427,7 @@ class Daemon:
                             time.sleep(0.24)
                     err = self.osk.hide()
                     if err is None:
-                        # A close can interrupt horizontal pager motion. Reset
-                        # both axes so the next open can never inherit an
-                        # off-screen keyboard position.
-                        self.osk.set_surface_offset(x=0, y=0)
-                        if self.keyboard_override and not self.tablet_mode:
-                            # Do not leave the hidden laptop-override keyboard as
-                            # an opaque/blank layer surface. Recreate it on demand.
-                            self.osk.stop()
+                        self.osk.set_surface_offset(y=0)
                 elif arg == "stop":
                     self.osk.stop()
                     err = None
