@@ -629,9 +629,11 @@ ShellRoot {
             // has the same absolute x origin as the bottom-left opening handle.
             anchors.left: parent.left
             anchors.top: parent.top
-            anchors.topMargin: 2
+            anchors.topMargin: 0
             width: root.barWidth
-            height: 18
+            // Keep the visual pill slim, but make the touch target generous.
+            // This remains inside the toolbar so it never steals key presses.
+            height: Math.min(toolbar.height, Math.max(36, root.barHeight))
             z: 5
 
             property real pressY: 0
