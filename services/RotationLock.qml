@@ -15,7 +15,8 @@ Singleton {
     property bool available: false
     property bool locked: false
     property bool tabletMode: false
-    property bool tabletModeChanging: false
+    property bool keyboardOverride: false
+    property bool keyboardOverrideChanging: false
     property bool rotationChanging: false
     property int transform: 0
     property int degrees: 0
@@ -70,12 +71,12 @@ Singleton {
         runRotationAction(normalized);
     }
 
-    function toggleTabletMode(): void {
-        if (tabletModeChanging)
+    function toggleKeyboardOverride(): void {
+        if (keyboardOverrideChanging)
             return;
-        tabletModeChanging = true;
-        tabletToggler.command = [root.bin, "mode", root.tabletMode ? "laptop" : "tablet"];
-        tabletToggler.running = true;
+        keyboardOverrideChanging = true;
+        keyboardToggler.command = [root.bin, "keyboard-override", root.keyboardOverride ? "off" : "on"];
+        keyboardToggler.running = true;
     }
 
     Process {
@@ -98,6 +99,7 @@ Singleton {
                 root.available = true;
                 root.locked = data.rotation_locked ?? root.locked;
                 root.tabletMode = data.tablet_mode ?? root.tabletMode;
+                root.keyboardOverride = data.keyboard_override ?? root.keyboardOverride;
                 root.transform = data.transform ?? root.transform;
                 root.degrees = data.degrees ?? root.degrees;
                 root.autoRotate = data.auto_rotate ?? root.autoRotate;
@@ -135,10 +137,10 @@ Singleton {
     }
 
     Process {
-        id: tabletToggler
+        id: keyboardToggler
         running: false
         onExited: code => {
-            root.tabletModeChanging = false;
+            root.keyboardOverrideChanging = false;
             if (code === 0)
                 root.refresh();
             else

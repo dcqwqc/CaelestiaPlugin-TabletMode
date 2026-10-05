@@ -14,7 +14,7 @@
       "type": "quick-toggle",
       "source": "toggles/TabletModeToggle.qml",
       "properties": {
-        "name": "tabletMode"
+        "name": "touchKeyboard"
       }
     },
     {

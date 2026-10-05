@@ -67,6 +67,7 @@ MOTION_SOCKET_PATH = RUNTIME_DIR / f"{APP}-motion.sock"
 OSK_PID_PATH = RUNTIME_DIR / f"{APP}-wvkbd.pid"
 HANDLE_PID_PATH = RUNTIME_DIR / f"{APP}-handle.pid"
 CAPTURE_TRANSFORM_PATH = RUNTIME_DIR / f"{APP}-capture-transform"
+KEYBOARD_OVERRIDE_PATH = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "caelestia-tabletmode" / "keyboard-override"
 IIO_ROOT = Path("/sys/bus/iio/devices")
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 TOUCHPAD_HOOK_BUILD = PLUGIN_ROOT / "scripts" / "build-touchpad-hook"
@@ -1553,6 +1554,10 @@ class Daemon:
 
         self.tablet_mode = False
         self.initial_tablet_mode = tablet_switch_state()
+        try:
+            self.keyboard_override = KEYBOARD_OVERRIDE_PATH.read_text(encoding="utf-8").strip() == "1"
+        except OSError:
+            self.keyboard_override = False
         # Windows temporarily fitted above the keyboard, keyed by address and
         # carrying the fullscreen mode originally reported to the client.
         self._keyboard_fit_windows: dict[str, int] = {}
@@ -2175,7 +2180,7 @@ class Daemon:
         whichever way round the keyboard is. In laptop mode there is a real
         keyboard, so it goes away entirely.
         """
-        if not self.tablet_mode:
+        if not (self.tablet_mode or self.keyboard_override):
             self.grab.stop()
             self.publish_osk(False, 0)
             return
@@ -2224,7 +2229,12 @@ class Daemon:
                 # anything tablet mode turned off, and it is the only thing
                 # standing between a missed un-fold and a dead keyboard.
                 self.set_pointers_enabled(True, force=True)
-                self.osk.stop()
+                if not self.keyboard_override:
+                    self.osk.stop()
+                else:
+                    err = self.osk.start()
+                    if err:
+                        log(err)
                 if not unchanged:
                     mode = str(self.cfg.get("auto_rotate", "always")).strip().lower()
                     if not self.rotation_locked:
@@ -2261,6 +2271,23 @@ class Daemon:
             self.sync_handle()
             return {"ok": True, "tablet_mode": on}
 
+    def set_keyboard_override(self, on: bool) -> dict:
+        """Keep the touch keyboard available in laptop mode without faking tablet mode."""
+        with self.lock:
+            self.keyboard_override = bool(on)
+            KEYBOARD_OVERRIDE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            KEYBOARD_OVERRIDE_PATH.write_text(("1" if self.keyboard_override else "0") + chr(10), encoding="utf-8")
+            if self.keyboard_override:
+                err = self.osk.start()
+                if err:
+                    return {"ok": False, "error": err}
+            elif not self.tablet_mode:
+                if self.osk.visible:
+                    self.fit_fullscreen_above_keyboard(False)
+                self.osk.stop()
+            self.sync_handle()
+            return {"ok": True, "keyboard_override": self.keyboard_override}
+
     def handle(self, req: dict) -> dict:
         cmd = req.get("cmd")
         arg = req.get("arg")
@@ -2270,6 +2297,7 @@ class Daemon:
                 return {
                     "ok": True,
                     "tablet_mode": self.tablet_mode,
+                    "keyboard_override": self.keyboard_override,
                     "rotation_locked": self.rotation_locked,
                     "auto_rotate": self.cfg.get("auto_rotate"),
                     "orientation": self.orientation,
@@ -2303,6 +2331,12 @@ class Daemon:
             if arg not in ("tablet", "laptop"):
                 return {"ok": False, "error": "mode takes 'tablet' or 'laptop'"}
             return self.set_tablet_mode(arg == "tablet")
+
+        if cmd == "keyboard-override":
+            if arg not in ("on", "off", "toggle"):
+                return {"ok": False, "error": "keyboard-override takes on|off|toggle"}
+            target = (not self.keyboard_override) if arg == "toggle" else arg == "on"
+            return self.set_keyboard_override(target)
 
         if cmd == "rotate":
             with self.lock:
@@ -2607,6 +2641,9 @@ def main() -> int:
     p_mode = sub.add_parser("mode", help="tell the daemon the hinge changed")
     p_mode.add_argument("state", choices=["tablet", "laptop"])
 
+    p_keyboard = sub.add_parser("keyboard-override", help="keep the touch keyboard available in laptop mode")
+    p_keyboard.add_argument("state", choices=["on", "off", "toggle"])
+
     p_rot = sub.add_parser("rotate", help="rotate the panel")
     p_rot.add_argument(
         "angle",
@@ -2655,6 +2692,8 @@ def main() -> int:
 
     if args.cmd == "mode":
         reply = send({"cmd": "mode", "arg": args.state})
+    elif args.cmd == "keyboard-override":
+        reply = send({"cmd": "keyboard-override", "arg": args.state})
     elif args.cmd == "rotate":
         reply = send({"cmd": "rotate", "arg": args.angle})
     elif args.cmd == "osk":
