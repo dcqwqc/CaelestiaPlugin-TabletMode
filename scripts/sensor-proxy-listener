@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -u
+
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+OUT="$RUNTIME_DIR/yoga-tablet-sensor-orientation"
+PID="$RUNTIME_DIR/yoga-tablet-sensor-proxy.pid"
+LOCK="$RUNTIME_DIR/yoga-tablet-sensor-proxy.lock"
+CLAIM_PID=""
+
+mkdir -p "$RUNTIME_DIR"
+exec 9>"$LOCK"
+flock -n 9 || exit 0
+
+SELF="$BASHPID"
+printf '%s\n' "$SELF" > "$PID"
+
+cleanup() {
+    if [[ -n "$CLAIM_PID" ]]; then
+        kill "$CLAIM_PID" 2>/dev/null || true
+    fi
+    current=""
+    if [[ -r "$PID" ]]; then
+        current="$(cat "$PID" 2>/dev/null || true)"
+    fi
+    if [[ "$current" == "$SELF" ]]; then
+        rm -f "$PID" "$OUT"
+    fi
+}
+trap cleanup EXIT INT TERM HUP
+
+publish() {
+    local orientation="$1"
+    case "$orientation" in
+        normal|bottom-up|left-up|right-up) ;;
+        *) return ;;
+    esac
+    local current=""
+    [[ -r "$OUT" ]] && current="$(cat "$OUT" 2>/dev/null || true)"
+    [[ "$current" == "$orientation" ]] && return
+    local tmp="$OUT.tmp.$SELF.$BASHPID"
+    printf '%s\n' "$orientation" > "$tmp"
+    mv -f "$tmp" "$OUT"
+}
+
+while true; do
+    rm -f "$OUT"
+    monitor-sensor --accel >/dev/null 2>&1 9>&- &
+    CLAIM_PID="$!"
+
+    while kill -0 "$CLAIM_PID" 2>/dev/null; do
+        value="$(busctl --system get-property net.hadess.SensorProxy /net/hadess/SensorProxy net.hadess.SensorProxy AccelerometerOrientation 2>/dev/null || true)"
+        orientation="${value#*\"}"
+        orientation="${orientation%%\"*}"
+        publish "$orientation"
+        sleep 0.2 9>&-
+    done
+
+    wait "$CLAIM_PID" 2>/dev/null || true
+    CLAIM_PID=""
+    sleep 1 9>&-
+done

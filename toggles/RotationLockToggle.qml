@@ -20,6 +20,8 @@ StyledRect {
     opacity: RotationPlugin.RotationLock.rotationChanging ? 0.72 : 1
 
     readonly property bool automatic: !RotationPlugin.RotationLock.locked
+        && RotationPlugin.RotationLock.autoRotationActive
+    readonly property bool manual: RotationPlugin.RotationLock.locked
     readonly property int degrees: RotationPlugin.RotationLock.degrees
     readonly property string angleLabel: degrees === 270 ? "-90°" : degrees + "°"
     readonly property real outerRadius: Math.min(height / 2, Tokens.rounding.large)
@@ -67,7 +69,7 @@ StyledRect {
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         first: false
-        selected: !root.automatic
+        selected: root.manual
     }
 
     Item {
@@ -109,7 +111,7 @@ StyledRect {
         anchors.bottom: parent.bottom
 
         StateLayer {
-            color: !root.automatic ? root.selectedOnColour : root.inactiveOnColour
+            color: root.manual ? root.selectedOnColour : root.inactiveOnColour
             rect.topLeftRadius: root.innerRadius
             rect.bottomLeftRadius: root.innerRadius
             rect.topRightRadius: root.outerRadius
@@ -125,7 +127,7 @@ StyledRect {
             anchors.verticalCenterOffset: 1
             text: root.angleLabel
             animate: true
-            color: !root.automatic ? root.selectedOnColour : root.inactiveOnColour
+            color: root.manual ? root.selectedOnColour : root.inactiveOnColour
             horizontalAlignment: Text.AlignHCenter
             font.weight: Font.DemiBold
         }

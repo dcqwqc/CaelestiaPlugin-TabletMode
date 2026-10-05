@@ -5,9 +5,9 @@ Convertible-laptop support for Caelestia and Hyprland.
 The plugin provides:
 
 - tablet-mode state integration for foldable/convertible hardware
-- accelerometer-driven auto-rotation through all four orientations
+- live iio-sensor-proxy auto-rotation through all four orientations (with the raw HID-IIO sysfs path only as a fallback)
 - automatic accelerometer rediscovery if the Intel sensor hub disappears and later re-enumerates
-- hardware mount correction for Lenovo Yoga 7 2-in-1 14IML9 (83DJ), whose IIO accelerometer is rotated 90° relative to the panel
+- sensor-mount-independent live rotation: the current SensorProxy orientation and screen transform form a relative baseline, so a fixed accelerometer mounting offset does not break rotation
 - matching touchscreen and pen transforms
 - only the built-in laptop touchpad rotates with the display through a tiny post-libinput Hyprland motion hook; USB/Bluetooth/virtual pointers stay neutral
 - an always-split Rotation quick control: **Auto** on the left is a real on/off toggle, while the right side shows **0° / 90° / 180° / -90°** and forces the next 90° step
@@ -36,7 +36,7 @@ The historical helper executable is named `yoga-tablet`, and older installations
 
 ## Configuration
 
-Use the Caelestia Plugins page for rotation thresholds, auto-rotation policy, on-screen keyboard options, and folded-input policy. The Rotation quick control is permanently split: the left side toggles accelerometer-driven rotation on/off without changing the current angle when locking, while each tap on the right side forces the next 90-degree orientation and holds it. Display and touchscreen/pen transforms are updated together. Relative motion from only udev-integrated touchpads is then rotated inside Hyprland after libinput, because many laptop touchpads (including Mirai's ELAN device) expose neither libinput rotation nor a calibration matrix. External USB/Bluetooth/virtual pointers are intentionally excluded. A specific monitor can be selected where automatic internal-panel detection is not suitable.
+Use the Caelestia Plugins page for rotation thresholds, auto-rotation policy, on-screen keyboard options, and folded-input policy. **Auto rotation scope** has three modes: always follows the live sensor in both laptop and tablet mode, tablet follows it only while folded, and never disables automatic rotation. The Rotation quick control is permanently split: the left side toggles accelerometer-driven rotation on/off without changing the current angle when locking, while each tap on the right side forces the next 90-degree orientation and holds it. Display and touchscreen/pen transforms are updated together. Relative motion from only udev-integrated touchpads is then rotated inside Hyprland after libinput, because many laptop touchpads (including Mirai's ELAN device) expose neither libinput rotation nor a calibration matrix. External USB/Bluetooth/virtual pointers are intentionally excluded. A specific monitor can be selected where automatic internal-panel detection is not suitable.
 
 ## Keyboard
 

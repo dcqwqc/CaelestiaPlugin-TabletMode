@@ -20,6 +20,7 @@ Singleton {
     property int transform: 0
     property int degrees: 0
     property string autoRotate: "always"
+    property bool autoRotationActive: false
 
     function refresh(): void {
         if (!status.running)
@@ -100,6 +101,7 @@ Singleton {
                 root.transform = data.transform ?? root.transform;
                 root.degrees = data.degrees ?? root.degrees;
                 root.autoRotate = data.auto_rotate ?? root.autoRotate;
+                root.autoRotationActive = data.auto_rotation_active ?? root.autoRotationActive;
             }
         }
 

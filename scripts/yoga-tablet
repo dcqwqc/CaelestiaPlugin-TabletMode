@@ -72,6 +72,9 @@ PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 TOUCHPAD_HOOK_BUILD = PLUGIN_ROOT / "scripts" / "build-touchpad-hook"
 TOUCHPAD_HOOK_NAME = "tabletmode-touchpad-rotate"
 TOUCHPAD_HOOK_DISPATCH = "tabletmode-touchpad-transform"
+SENSOR_PROXY_LISTENER = PLUGIN_ROOT / "scripts" / "sensor-proxy-listener"
+SENSOR_PROXY_ORIENTATION_PATH = RUNTIME_DIR / f"{APP}-sensor-orientation"
+SENSOR_PROXY_PID_PATH = RUNTIME_DIR / f"{APP}-sensor-proxy.pid"
 # Caelestia rewrites this whenever the colour scheme or light/dark mode changes.
 SCHEME_PATH = (
     Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
@@ -1465,10 +1468,68 @@ class Accelerometer:
         return tuple(v * self.scale / 9.80665 for v in raw)  # type: ignore[return-value]
 
 
+
+class SensorProxy:
+    """Live orientation bridge backed by iio-sensor-proxy."""
+
+    VALID = {"normal", "bottom-up", "left-up", "right-up"}
+
+    def __init__(self):
+        self.last_launch = 0.0
+
+    def _pid(self) -> int | None:
+        try:
+            return int(SENSOR_PROXY_PID_PATH.read_text().strip())
+        except (OSError, ValueError):
+            return None
+
+    def alive(self) -> bool:
+        pid = self._pid()
+        if pid is None or pid <= 1:
+            return False
+        try:
+            raw = (Path("/proc") / str(pid) / "cmdline").read_bytes()
+        except OSError:
+            return False
+        return "sensor-proxy-listener" in raw.replace(b"\0", b" ").decode(errors="ignore")
+
+    def ensure(self) -> bool:
+        if self.alive():
+            return True
+        now = time.monotonic()
+        if now - self.last_launch < 2.0:
+            return False
+        self.last_launch = now
+        try:
+            SENSOR_PROXY_ORIENTATION_PATH.unlink(missing_ok=True)
+            SENSOR_PROXY_PID_PATH.unlink(missing_ok=True)
+        except OSError:
+            pass
+        ok = hypr_eval_lua(
+            f"hl.exec_cmd({lua_str(str(SENSOR_PROXY_LISTENER))})\n"
+        )
+        if not ok:
+            log("could not launch live sensor proxy listener")
+        return ok
+
+    def read(self) -> str | None:
+        self.ensure()
+        try:
+            orientation = SENSOR_PROXY_ORIENTATION_PATH.read_text().strip()
+        except OSError:
+            return None
+        return orientation if orientation in self.VALID else None
+
+
 class Daemon:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.accel = Accelerometer(cfg)
+        self.sensor_proxy = SensorProxy()
+        self.sensor_source = "starting"
+        self.proxy_orientation: str | None = None
+        self._proxy_baseline_orientation: str | None = None
+        self._proxy_baseline_transform = 0
         self.osk = Osk(cfg)
         self.grab = Handle(cfg)
         self.motion = MotionServer(self.osk)
@@ -1483,6 +1544,7 @@ class Daemon:
         self._keyboard_original_frame: tuple[str, int] | None = None
         self.rotation_locked = False
         self.transform = self._current_transform()
+        self._proxy_baseline_transform = self.transform
         self._touchpad_hook_ready = False
         # A fresh compositor/input enumeration can reset relative pointer
         # rotation. Reconcile the built-in touchpad with the inherited display.
@@ -1697,10 +1759,10 @@ class Daemon:
     def rotation_active(self) -> bool:
         if self.rotation_locked:
             return False
-        mode = self.cfg.get("auto_rotate", "always")
-        if mode == "never":
+        mode = str(self.cfg.get("auto_rotate", "always")).strip().lower()
+        if mode in ("never", "off"):
             return False
-        if mode == "tablet":
+        if mode in ("tablet", "tablet-only", "tablet only"):
             return self.tablet_mode
         return True
 
@@ -1747,18 +1809,50 @@ class Daemon:
 
         return orientation
 
+    def orientation_from_proxy(self, raw_orientation: str) -> str:
+        """Map live proxy orientation by relative movement, not mount angle."""
+        raw_transform = ORIENTATION_TRANSFORM.get(raw_orientation)
+        if raw_transform is None:
+            return self.orientation
+
+        if self._proxy_baseline_orientation is None:
+            self._proxy_baseline_orientation = raw_orientation
+            self._proxy_baseline_transform = self.transform
+            log(
+                "live sensor baseline: "
+                f"{raw_orientation} -> {self.transform * 90} deg"
+            )
+            return TRANSFORM_ORIENTATION[self.transform]
+
+        baseline_raw = ORIENTATION_TRANSFORM[self._proxy_baseline_orientation]
+        delta = (raw_transform - baseline_raw) % 4
+        target = (self._proxy_baseline_transform + delta) % 4
+        orientation = TRANSFORM_ORIENTATION[target]
+
+        if self.cfg.get("invert_sides"):
+            if orientation == "left-up":
+                orientation = "right-up"
+            elif orientation == "right-up":
+                orientation = "left-up"
+        return orientation
+
     def sample_orientation(self) -> str:
         """Refresh orientation synchronously for user-triggered unlocks."""
-        # The Intel ISH can disappear and re-enumerate after suspend or a
-        # firmware reset. Never make a missing sensor at daemon start permanent.
-        if self.accel.base is None:
-            self.accel.rediscover()
-        g = self.accel.read_g()
-        if g is None:
-            self.accel.rediscover()
+        proxy = self.sensor_proxy.read()
+        if proxy is not None:
+            self.sensor_source = "iio-sensor-proxy"
+            self.proxy_orientation = proxy
+            self.orientation = self.orientation_from_proxy(proxy)
+        else:
+            self.sensor_source = "sysfs-fallback"
+            if self.accel.base is None:
+                self.accel.rediscover()
             g = self.accel.read_g()
-        if g is not None:
-            self.orientation = self.orientation_from(g)
+            if g is None:
+                self.accel.rediscover()
+                g = self.accel.read_g()
+            if g is not None:
+                self.orientation = self.orientation_from(g)
         self._candidate, self._candidate_hits = None, 0
         return self.orientation
 
@@ -1768,43 +1862,60 @@ class Daemon:
         rediscover_every = max(1, int(round(2.0 / max(interval, 0.05))))
         missing_ticks = rediscover_every
         missing_logged = False
+        proxy_logged = False
 
         while not self.stopping.wait(interval):
-            if self.accel.base is None or missing_ticks >= rediscover_every:
-                old_base = self.accel.base
-                self.accel.rediscover()
-                missing_ticks = 0
-                if self.accel.base is not None and self.accel.base != old_base:
-                    log(f"accelerometer recovered: {self.accel.base}")
+            proxy = self.sensor_proxy.read()
+            candidate = None
+
+            if proxy is not None:
+                self.sensor_source = "iio-sensor-proxy"
+                self.proxy_orientation = proxy
+                candidate = self.orientation_from_proxy(proxy)
+                if not proxy_logged:
+                    log("using live iio-sensor-proxy orientation events")
+                    proxy_logged = True
+            else:
+                self.sensor_source = "sysfs-fallback"
+                self.proxy_orientation = None
+                proxy_logged = False
+
+                if self.accel.base is None or missing_ticks >= rediscover_every:
+                    old_base = self.accel.base
+                    self.accel.rediscover()
+                    missing_ticks = 0
+                    if self.accel.base is not None and self.accel.base != old_base:
+                        log(f"accelerometer recovered: {self.accel.base}")
+                        missing_logged = False
+
+                if self.accel.base is None:
+                    if not missing_logged:
+                        log("no accelerometer found; waiting for it to recover")
+                        missing_logged = True
+                    missing_ticks += 1
+                    continue
+
+                g = self.accel.read_g()
+                if g is None:
+                    if not missing_logged:
+                        log("accelerometer read path disappeared; rediscovering")
+                        missing_logged = True
+                    missing_ticks += 1
+                    continue
+
+                if missing_logged:
+                    log(f"accelerometer healthy again: {self.accel.base}")
                     missing_logged = False
+                missing_ticks = 0
+                candidate = self.orientation_from(g)
 
-            if self.accel.base is None:
-                if not missing_logged:
-                    log("no accelerometer found; waiting for it to recover")
-                    missing_logged = True
-                missing_ticks += 1
+            if candidate is None:
                 continue
-
-            g = self.accel.read_g()
-            if g is None:
-                if not missing_logged:
-                    log("accelerometer read path disappeared; rediscovering")
-                    missing_logged = True
-                missing_ticks += 1
-                continue
-
-            if missing_logged:
-                log(f"accelerometer healthy again: {self.accel.base}")
-                missing_logged = False
-            missing_ticks = 0
 
             with self.lock:
-                candidate = self.orientation_from(g)
                 if candidate == self.orientation:
                     self._candidate, self._candidate_hits = None, 0
                     continue
-                # Require the new reading to persist, so that carrying the
-                # machine around does not spin the display.
                 if candidate == self._candidate:
                     self._candidate_hits += 1
                 else:
@@ -1818,6 +1929,7 @@ class Daemon:
                 target = ORIENTATION_TRANSFORM[candidate]
                 if target != self.transform:
                     self.apply_transform(target, reason=candidate)
+
 
     # -- commands -----------------------------------------------------------
 
@@ -2086,10 +2198,21 @@ class Daemon:
                 self.set_pointers_enabled(True, force=True)
                 self.osk.stop()
                 if not unchanged:
-                    # Folding back into a laptop always means upright.
-                    if not self.rotation_locked and self.transform != NORMAL:
-                        self.orientation = "normal"
-                        self.apply_transform(NORMAL, reason="laptop mode")
+                    mode = str(self.cfg.get("auto_rotate", "always")).strip().lower()
+                    if not self.rotation_locked:
+                        if mode in ("tablet", "tablet-only", "tablet only"):
+                            # Tablet-only means ordinary laptop mode returns to
+                            # the canonical landscape orientation.
+                            self.orientation = "normal"
+                            if self.transform != NORMAL:
+                                self.apply_transform(NORMAL, reason="laptop mode")
+                        elif mode not in ("never", "off"):
+                            # Everywhere mode keeps following the physical pose
+                            # even after unfolding.
+                            self.sample_orientation()
+                            target = ORIENTATION_TRANSFORM[self.orientation]
+                            if target != self.transform:
+                                self.apply_transform(target, reason="laptop mode sensor")
                     if announce:
                         notify(
                             self.cfg,
@@ -2097,6 +2220,16 @@ class Daemon:
                             "Keyboard and touchpad restored",
                             "laptop_chromebook",
                         )
+
+            # Entering tablet mode activates the tablet-only policy. Catch up
+            # immediately to the pose already observed while laptop rotation was
+            # intentionally inactive.
+            if on and not unchanged and not self.rotation_locked and self.rotation_active():
+                self.sample_orientation()
+                target = ORIENTATION_TRANSFORM[self.orientation]
+                if target != self.transform:
+                    self.apply_transform(target, reason="tablet mode sensor")
+
             self.sync_handle()
             return {"ok": True, "tablet_mode": on}
 
@@ -2128,6 +2261,9 @@ class Daemon:
                     "accelerometer": str(self.accel.base) if self.accel.base else None,
                     "invert_sides": bool(self.cfg.get("invert_sides")),
                     "sensor_mount_quarters": sensor_mount_quarters(),
+                    "sensor_source": self.sensor_source,
+                    "sensor_proxy_orientation": self.proxy_orientation,
+                    "auto_rotation_active": self.rotation_active(),
                 }
 
         if cmd == "fullscreen":
@@ -2305,6 +2441,7 @@ class Daemon:
 
         if cmd == "reload":
             with self.lock:
+                was_active = self.rotation_active()
                 self.cfg.update(load_config())
                 self.osk.cfg = self.cfg
                 self.osk._flags = None
@@ -2312,6 +2449,12 @@ class Daemon:
                 self.grab.stop()
                 self._sync_touchpad_rotation(self.transform, reason="reload")
                 self.sync_handle()
+                now_active = self.rotation_active()
+                if now_active and not was_active:
+                    self.sample_orientation()
+                    target = ORIENTATION_TRANSFORM[self.orientation]
+                    if target != self.transform:
+                        self.apply_transform(target, reason="rotation scope")
                 # Settings that change the inherited glide fd or toolbar
                 # environment need a fresh child; preserve visibility.
                 if self.osk._alive():

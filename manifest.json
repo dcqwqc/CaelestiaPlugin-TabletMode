@@ -1,10 +1,10 @@
 {
   "name": "TabletMode",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "author": "dcqwqc",
   "homepage": "https://github.com/dcqwqc/CaelestiaPlugin-TabletMode",
   "icon": "tablet_android",
-  "description": "Convertible laptop support for Caelestia: corrected sensor auto-rotation, true Auto/hold rotation control, synchronized touchscreen/pen and internal touchpad motion, searchable Gboard-style keyboard, compact portrait settings, and lock-screen blanking.",
+  "description": "Convertible laptop support for Caelestia: live iio-sensor-proxy auto-rotation in laptop/tablet scopes, true Auto/hold controls, synchronized touchscreen/pen/internal-touchpad motion, searchable Gboard-style keyboard, compact portrait settings, and lock-screen blanking.",
   "entryPoints": [
     {
       "type": "custom",

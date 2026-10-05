@@ -3,11 +3,12 @@ import Caelestia.Plugins
 SettingsObject {
     property string autoRotate: "always"
     SettingMeta on autoRotate {
-        label: "Automatic rotation"
-        description: "Always rotates from the accelerometer, only rotates while folded into tablet mode, or never rotates automatically."
+        label: "Auto rotation scope"
+        description: "Always = laptop + tablet mode. Tablet = only while folded. Never = automatic rotation off."
         icon: "screen_rotation"
         inputType: SettingMeta.SplitButton
         options: ["always", "tablet", "never"]
+        optionIcons: ["devices", "tablet_android", "screen_lock_rotation"]
     }
 
     property bool invertSides: false
