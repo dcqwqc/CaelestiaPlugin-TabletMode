@@ -728,6 +728,7 @@ class Osk:
         self._slide_generation = 0
         self._surface_x = 0
         self._surface_y = 0
+        self._shell_clip_inset = 8
 
     @property
     def plugin_root(self) -> Path:
@@ -904,6 +905,7 @@ class Osk:
             self.proc.wait(timeout=0.4)
         except subprocess.TimeoutExpired:
             write_child_pid(OSK_PID_PATH, self.proc.pid)
+            self.set_shell_clip_inset(self._shell_clip_inset)
             return None
         err = ""
         if self.proc.stderr is not None:
@@ -988,6 +990,19 @@ class Osk:
             sx = self._surface_x if x is None else int(x)
             sy = self._surface_y if y is None else int(y)
         return self._write_surface_offset(sx, sy)
+
+    def set_shell_clip_inset(self, inset: int) -> bool:
+        self._shell_clip_inset = max(0, min(64, int(inset)))
+        fd = self.control_write_fd
+        if fd is None or not self._alive():
+            # Remember it so the next preloaded keyboard starts with the correct
+            # fullscreen/normal viewport as soon as its control pipe is ready.
+            return True
+        try:
+            os.write(fd, f"clip {self._shell_clip_inset}\n".encode("ascii"))
+            return True
+        except (BlockingIOError, BrokenPipeError, OSError):
+            return False
 
     def animate_surface(
         self,
@@ -1557,7 +1572,7 @@ class Daemon:
         self._candidate: str | None = None
         self._candidate_hits = 0
         # Last measured keyboard offset, per orientation.
-        self._osk_offsets: dict[int, int] = {}
+        self._osk_offsets: dict[tuple[int, bool], int] = {}
 
     # -- compositor state ---------------------------------------------------
 
@@ -2104,9 +2119,21 @@ class Daemon:
             self._write_osk_state(visible, inset if visible else 0)
         return seq, started
 
+    def fullscreen_shell_hidden(self) -> bool:
+        """Whether the active client is true/fitted fullscreen with shell chrome hidden."""
+        active = hyprctl_json("activewindow")
+        if not isinstance(active, dict):
+            return False
+        try:
+            internal = int(active.get("fullscreen", 0) or 0)
+            client = int(active.get("fullscreenClient", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        return internal == 2 or (internal > 0 and client == 2)
+
     def expected_osk_offset(self) -> int:
         """Return the keyboard target height before its layer surface maps."""
-        remembered = self._osk_offsets.get(self.transform % 2)
+        remembered = self._osk_offsets.get((self.transform % 2, self.fullscreen_shell_hidden()))
         if remembered:
             return int(remembered)
 
@@ -2116,10 +2143,11 @@ class Daemon:
             index = command.index(flag)
             value = int(command[index + 1])
             if value > 0:
-                # wvkbd deliberately floats 10 logical pixels above Caelestia's
-                # bottom edge reservation. The visual top-edge travel therefore
-                # includes that clearance as well as the configured key surface.
-                return value + 10
+                # The ordinary Caelestia shell reserves 10 logical pixels at
+                # the bottom, but true fullscreen hides that chrome. Carrying
+                # the normal clearance into fullscreen makes the toolbar/grabber
+                # sit 10px too high over the client during the opening motion.
+                return value + (0 if self.fullscreen_shell_hidden() else 10)
         except (ValueError, IndexError, TypeError):
             pass
         return 560 if self.transform % 2 else 400
@@ -2158,11 +2186,11 @@ class Daemon:
             # of the way as the keyboard rises rather than once it has landed,
             # then correct it from the measurement. Any difference lands inside
             # the shell's own 500ms easing and is never seen.
-            remembered = self._osk_offsets.get(self.transform % 2)
+            remembered = self._osk_offsets.get((self.transform % 2, self.fullscreen_shell_hidden()))
             if remembered:
                 self.publish_osk(True, remembered)
             offset = self.osk_offset(mon)
-            self._osk_offsets[self.transform % 2] = offset
+            self._osk_offsets[(self.transform % 2, self.fullscreen_shell_hidden())] = offset
             self.publish_osk(True, offset)
             self.grab.start(name, mode="close", bottom=offset)
         else:
@@ -2378,6 +2406,13 @@ class Daemon:
                     return {"ok": False, "error": err}
                 self.sync_handle()
                 return {"ok": True, "osk_visible": self.osk.visible}
+
+        if cmd == "viewport":
+            mode = str(arg or "")
+            if mode not in ("normal", "fullscreen"):
+                return {"ok": False, "error": "viewport takes normal|fullscreen"}
+            ok = self.osk.set_shell_clip_inset(0 if mode == "fullscreen" else 8)
+            return {"ok": ok, "mode": mode}
 
         if cmd == "pager":
             action = str(arg or "")
@@ -2597,6 +2632,8 @@ def main() -> int:
     )
     p_toolbar = sub.add_parser("toolbar", help="select a native keyboard toolbar layer")
     p_toolbar.add_argument("action", choices=["keyboard", "tools"])
+    p_viewport = sub.add_parser("viewport", help="match OSK geometry to shell chrome visibility")
+    p_viewport.add_argument("mode", choices=["normal", "fullscreen"])
     p_pager = sub.add_parser("pager", help="animate the native keyboard inside the mode pager")
     p_pager.add_argument("action", choices=["keyboard-out-left", "keyboard-in-left", "keyboard-reset"])
     p_pager.add_argument("width", type=int)
@@ -2624,6 +2661,8 @@ def main() -> int:
         reply = send({"cmd": "osk", "arg": args.action})
     elif args.cmd == "toolbar":
         reply = send({"cmd": "toolbar", "arg": args.action})
+    elif args.cmd == "viewport":
+        reply = send({"cmd": "viewport", "arg": args.mode})
     elif args.cmd == "pager":
         reply = send({
             "cmd": "pager",

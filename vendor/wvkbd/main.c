@@ -89,7 +89,7 @@ static int32_t vertical_offset = 0;
  * utility pager. The layer surface normally starts ~8 logical px before that
  * viewport on Caelestia, so balancing +8/-8 preserves its width while moving
  * the hard clip edge to the pager boundary. */
-static const int32_t shell_clip_inset = 8;
+static int32_t shell_clip_inset = 8;
 
 /* event handler prototypes */
 static void wl_pointer_enter(void *data, struct wl_pointer *wl_pointer,
@@ -915,6 +915,23 @@ set_surface_offset(int32_t x, int32_t y)
     wl_surface_commit(draw_surf.surf);
 }
 
+static void
+set_shell_clip_inset(int32_t inset)
+{
+    if (inset < 0)
+        inset = 0;
+    if (inset > 64)
+        inset = 64;
+    shell_clip_inset = inset;
+    if (!layer_surface)
+        return;
+
+    zwlr_layer_surface_v1_set_margin(
+        layer_surface, 0, -shell_clip_inset,
+        vertical_offset, shell_clip_inset);
+    wl_surface_commit(draw_surf.surf);
+}
+
 
 static void
 handle_control_fd(void)
@@ -928,8 +945,10 @@ handle_control_fd(void)
     char *save = NULL;
     for (char *line = strtok_r(buf, "\n", &save); line;
          line = strtok_r(NULL, "\n", &save)) {
-        int x = 0, y = 0;
-        if (sscanf(line, "offset %d %d", &x, &y) == 2)
+        int x = 0, y = 0, inset = 0;
+        if (sscanf(line, "clip %d", &inset) == 1)
+            set_shell_clip_inset(inset);
+        else if (sscanf(line, "offset %d %d", &x, &y) == 2)
             set_surface_offset(x, y);
         else if (sscanf(line, "offset %d", &x) == 1)
             set_surface_offset(x, vertical_offset);

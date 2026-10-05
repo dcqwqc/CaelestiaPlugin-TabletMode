@@ -176,9 +176,52 @@ ShellRoot {
         onLoadFailed: root.oskStateLoaded = false
     }
 
-    // Clears Caelestia's left bar, which reserves 60px, so the strip never
-    // shadows it.
-    readonly property real leftMargin: envNum("YOGA_HANDLE_LEFT", 68)
+    Process {
+        id: fullscreenProbe
+        command: ["hyprctl", "-j", "activewindow"]
+        running: false
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    const active = JSON.parse(text);
+                    const internal = Number(active.fullscreen) || 0;
+                    const client = Number(active.fullscreenClient) || 0;
+                    // TabletMode temporarily converts true fullscreen (2) to
+                    // internal mode 1 while the OSK is open so the app can fit
+                    // above the keyboard. fullscreenClient stays 2 in that case.
+                    root.fullscreenChromeHidden =
+                        internal === 2 || (internal > 0 && client === 2);
+                } catch (_) {
+                }
+            }
+        }
+    }
+
+    Timer {
+        id: fullscreenProbeTimer
+        interval: 300
+        repeat: true
+        running: true
+        onTriggered: {
+            if (!fullscreenProbe.running)
+                fullscreenProbe.running = true;
+        }
+    }
+
+    onFullscreenChromeHiddenChanged: {
+        Quickshell.execDetached([
+            root.tabletBin,
+            "viewport",
+            root.fullscreenChromeHidden ? "fullscreen" : "normal"
+        ]);
+    }
+
+    // Caelestia's normal shell reserves its left bar. True fullscreen hides
+    // that chrome, so keeping the reserve would leave every OSK utility surface
+    // visibly shifted right and narrower than the native keyboard.
+    readonly property real normalLeftMargin: envNum("YOGA_HANDLE_LEFT", 68)
+    property bool fullscreenChromeHidden: false
+    readonly property real leftMargin: fullscreenChromeHidden ? 0 : normalLeftMargin
     readonly property real barWidth: envNum("YOGA_HANDLE_WIDTH", 190)
     readonly property real barHeight: envNum("YOGA_HANDLE_HEIGHT", 26)
 
@@ -268,6 +311,7 @@ ShellRoot {
         return buttons;
     }
     Component.onCompleted: {
+        fullscreenProbe.running = true;
         // Map the toolbar surface transparent at the bottom first. On the next
         // frame it may rise with the keyboard, so Hyprland never gets a visible
         // freshly-mapped toolbar to animate in from the side.

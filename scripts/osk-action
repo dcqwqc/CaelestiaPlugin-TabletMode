@@ -185,7 +185,13 @@ def paste_text(text: str) -> int:
                 pasted = subprocess.run(["wtype", "-M", "ctrl", "-k", "v", "-m", "ctrl"],
                                         check=False, timeout=2, stdout=subprocess.DEVNULL,
                                         stderr=subprocess.DEVNULL)
-                return 0 if pasted.returncode == 0 else 1
+                if pasted.returncode == 0:
+                    return 0
+        # Some fullscreen/Wayland clients ignore a synthetic Ctrl+V even though
+        # wl-copy succeeded. Fall back to wtype's direct text path instead of
+        # turning a history click into a silent no-op.
+        if not shutil.which("wtype"):
+            return 1
         result = subprocess.run(["wtype", "--", text], check=False, timeout=2,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return 0 if result.returncode == 0 else 1
@@ -194,10 +200,14 @@ def paste_text(text: str) -> int:
 
 
 def dictation_insert(index_text: str, timestamp_text: str) -> int:
-    if not re.fullmatch(r"\d{1,4}", index_text) or not re.fullmatch(r"\d{1,10}(?:\.\d{1,6})?", timestamp_text):
+    if not re.fullmatch(r"\d{1,4}", index_text) or len(timestamp_text) > 32:
         return 1
-    index, timestamp = int(index_text), float(timestamp_text)
-    if index >= HISTORY_LIMIT:
+    try:
+        timestamp = float(timestamp_text)
+    except ValueError:
+        return 1
+    index = int(index_text)
+    if index >= HISTORY_LIMIT or not math_is_timestamp(timestamp):
         return 1
     # Re-read the existing Protocol7 source at action time. The id/timestamp
     # pair prevents a stale filtered row from selecting a different utterance.
