@@ -2184,7 +2184,11 @@ class Daemon:
         whichever way round the keyboard is. In laptop mode there is a real
         keyboard, so it goes away entirely.
         """
-        if not (self.tablet_mode or self.keyboard_override):
+        # A manually opened keyboard must always keep its own toolbar/close
+        # grabber, even when the laptop-mode quick toggle is off. The toggle
+        # controls whether the *opening* handle stays resident while hidden;
+        # it must never strip controls from an already visible keyboard.
+        if not (self.tablet_mode or self.keyboard_override or self.osk.visible):
             self.grab.stop()
             self.publish_osk(False, 0)
             return
