@@ -17,6 +17,8 @@ Singleton {
     property bool tabletMode: false
     property bool keyboardOverride: false
     property bool keyboardOverrideChanging: false
+    property bool keyboardVisible: false
+    property bool keyboardVisibilityChanging: false
     property bool rotationChanging: false
     property int transform: 0
     property int degrees: 0
@@ -79,6 +81,14 @@ Singleton {
         keyboardToggler.running = true;
     }
 
+    function toggleKeyboardVisibility(): void {
+        if (keyboardVisibilityChanging)
+            return;
+        keyboardVisibilityChanging = true;
+        keyboardVisibilityToggler.command = [root.bin, "osk", root.keyboardVisible ? "hide" : "show"];
+        keyboardVisibilityToggler.running = true;
+    }
+
     Process {
         id: status
         command: [root.bin, "status"]
@@ -100,6 +110,7 @@ Singleton {
                 root.locked = data.rotation_locked ?? root.locked;
                 root.tabletMode = data.tablet_mode ?? root.tabletMode;
                 root.keyboardOverride = data.keyboard_override ?? root.keyboardOverride;
+                root.keyboardVisible = data.osk_visible ?? root.keyboardVisible;
                 root.transform = data.transform ?? root.transform;
                 root.degrees = data.degrees ?? root.degrees;
                 root.autoRotate = data.auto_rotate ?? root.autoRotate;
@@ -145,6 +156,38 @@ Singleton {
                 root.refresh();
             else
                 root.available = false;
+        }
+    }
+
+    Process {
+        id: keyboardVisibilityToggler
+        running: false
+        onExited: code => {
+            root.keyboardVisibilityChanging = false;
+            if (code === 0)
+                root.refresh();
+            else
+                root.available = false;
+        }
+    }
+
+    // Keep the quick-toggle state synchronized when the keyboard is opened
+    // or closed by the edge handle, hotkey, hinge policy, or another caller.
+    FileView {
+        path: Quickshell.env("XDG_RUNTIME_DIR") + "/yoga-tablet-osk.json"
+        watchChanges: true
+        printErrors: false
+
+        onFileChanged: reload()
+        onLoaded: {
+            try {
+                const state = JSON.parse(text());
+                root.keyboardVisible = state.visible ?? false;
+                root.tabletMode = state.tablet_mode ?? root.tabletMode;
+            } catch (e) {
+                // The daemon writes atomically; a transient parse failure will
+                // be followed by another file change. Keep the last good state.
+            }
         }
     }
 

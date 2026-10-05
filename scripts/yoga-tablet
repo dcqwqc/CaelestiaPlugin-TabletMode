@@ -2159,7 +2159,7 @@ class Daemon:
 
     def prepare_osk_show(self) -> int:
         """Prepare one shared vertical OSK+toolbar motion and return its travel."""
-        if not self.tablet_mode:
+        if not (self.tablet_mode or self.keyboard_override):
             return 0
         mon = pick_monitor(self.cfg)
         name = mon.get("name") if mon else None
@@ -2180,7 +2180,10 @@ class Daemon:
         whichever way round the keyboard is. In laptop mode there is a real
         keyboard, so it goes away entirely.
         """
-        if not (self.tablet_mode or self.keyboard_override):
+        # A visible keyboard always owns its toolbar/close grabber, even if
+        # it was opened manually in laptop mode. Availability policy only
+        # controls whether the opening handle remains resident while hidden.
+        if not (self.tablet_mode or self.keyboard_override or self.osk.visible):
             self.grab.stop()
             self.publish_osk(False, 0)
             return

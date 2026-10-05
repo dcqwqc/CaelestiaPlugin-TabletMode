@@ -6,9 +6,9 @@ import dcqwqc.tabletmode.services as TabletPlugin
 IconButton {
     visible: TabletPlugin.RotationLock.available
     icon: "keyboard"
-    checked: TabletPlugin.RotationLock.keyboardOverride
-    enabled: !TabletPlugin.RotationLock.keyboardOverrideChanging
-    onClicked: TabletPlugin.RotationLock.toggleKeyboardOverride()
+    checked: TabletPlugin.RotationLock.keyboardVisible
+    enabled: !TabletPlugin.RotationLock.keyboardVisibilityChanging
+    onClicked: TabletPlugin.RotationLock.toggleKeyboardVisibility()
 
     inactiveColour: Colours.layer(Colours.palette.m3surfaceContainerHighest, 2)
     fillWidth: true
