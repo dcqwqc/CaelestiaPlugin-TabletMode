@@ -21,6 +21,7 @@ StyledRect {
 
     readonly property bool automatic: !RotationPlugin.RotationLock.locked
     readonly property int degrees: RotationPlugin.RotationLock.degrees
+    readonly property string angleLabel: degrees === 270 ? "-90°" : degrees + "°"
     readonly property real outerRadius: Math.min(height / 2, Tokens.rounding.large)
     readonly property real innerRadius: Math.min(outerRadius, Tokens.rounding.small)
     readonly property real segmentGap: Math.max(2, Math.round(Tokens.spacing.extraSmall / 2))
@@ -119,17 +120,22 @@ StyledRect {
             }
         }
 
-        MaterialIcon {
+        StyledText {
             anchors.centerIn: parent
             anchors.verticalCenterOffset: 1
-            text: "screen_lock_rotation"
+            text: root.angleLabel
+            animate: true
             color: !root.automatic ? root.selectedOnColour : root.inactiveOnColour
-            fill: !root.automatic ? 1 : 0
-            fontStyle: Tokens.font.icon.small
-            rotation: root.degrees
-
-            Behavior on rotation { CAnim {} }
+            horizontalAlignment: Text.AlignHCenter
+            font.weight: Font.DemiBold
         }
+    }
+
+    Timer {
+        interval: 700
+        repeat: true
+        running: root.visible
+        onTriggered: RotationPlugin.RotationLock.refresh()
     }
 
     onVisibleChanged: if (visible)

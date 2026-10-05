@@ -605,15 +605,36 @@ def digitizer_names() -> list[str]:
     return names
 
 
-def touchpad_names() -> list[str]:
-    """Touchpads whose relative pointer axes should follow display rotation."""
+def _hypr_input_name(name: str) -> str:
+    """Normalize a kernel input name the same way Hyprland exposes it."""
+    return re.sub(r"[^a-z0-9:_-]+", "-", name.strip().lower()).strip("-")
+
+
+def internal_touchpad_names() -> list[str]:
+    """Return only built-in touchpads; never rotate Bluetooth/USB pointers."""
+    internal = set()
+    for event in Path("/sys/class/input").glob("event*"):
+        try:
+            kernel_name = (event / "device" / "name").read_text().strip()
+            device_path = str((event / "device").resolve()).lower()
+        except OSError:
+            continue
+        if "touchpad" not in kernel_name.lower():
+            continue
+        # Mirai's ELAN pad is I2C. serio/platform cover the common other
+        # built-in laptop paths while deliberately excluding USB/Bluetooth.
+        if not any(marker in device_path for marker in ("/i2c-", "/serio", "/platform/")):
+            continue
+        internal.add(_hypr_input_name(kernel_name))
+
     devices = hyprctl_json("devices")
-    if not devices:
+    if not devices or not internal:
         return []
+
     names = []
     for dev in devices.get("mice") or []:
         name = dev.get("name") or ""
-        if "touchpad" in name.lower():
+        if _hypr_input_name(name) in internal:
             names.append(name)
     return names
 
@@ -623,7 +644,7 @@ def pointer_names() -> list[str]:
     devices = hyprctl_json("devices")
     if not devices:
         return []
-    names = touchpad_names()
+    names = internal_touchpad_names()
     keyboards = devices.get("keyboards") or []
     for dev in keyboards:
         name = dev.get("name") or ""
@@ -1441,11 +1462,17 @@ class Daemon:
             return NORMAL
 
     def _touchpad_rotation_lines(self, transform: int) -> list[str]:
-        """Return native Hyprland pointer rotation updates for touchpads."""
+        """Rotate only the laptop's built-in touchpad with the physical panel."""
+        # Hyprland pointer rotation is clockwise. These four values provide the
+        # exact vector mapping we want:
+        #   0°   : up→up,       right→right
+        #   90°  : up→right,    right→down
+        #   180° : up→down,     right→left
+        #   270° : up→left,     right→up   (shown in the UI as -90°)
         degrees = (transform % 4) * 90
         return [
             f"hl.device({{ name = {lua_str(dev)}, rotation = {degrees} }})"
-            for dev in touchpad_names()
+            for dev in internal_touchpad_names()
         ]
 
     def _sync_touchpad_rotation(self, transform: int, reason: str = "") -> bool:
@@ -1456,7 +1483,7 @@ class Daemon:
             log("could not align touchpad rotation with display")
             return False
         log(
-            f"touchpad rotation -> {(transform % 4) * 90} deg"
+            f"internal touchpad rotation -> {(transform % 4) * 90} deg"
             f"{' (' + reason + ')' if reason else ''}"
         )
         return True

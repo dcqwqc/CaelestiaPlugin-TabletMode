@@ -8,8 +8,8 @@ The plugin provides:
 - accelerometer-driven auto-rotation through all four orientations
 - automatic accelerometer rediscovery if the Intel sensor hub disappears and later re-enumerates
 - matching touchscreen and pen transforms
-- touchpad pointer axes that rotate with the display through Hyprland's native per-device pointer rotation
-- an always-split Rotation quick control: **Auto** on the left, **Force +90°** on the right
+- only the built-in laptop touchpad rotates with the display through Hyprland's native per-device pointer rotation; USB/Bluetooth pointers stay neutral
+- an always-split Rotation quick control: **Auto** on the left, current **0° / 90° / 180° / -90°** angle on the right; tapping the angle forces the next 90° step
 - an on-screen keyboard and tablet-mode input handling
 - optional disabling of physical keyboard/touchpad input while folded
 
@@ -35,7 +35,7 @@ The historical helper executable is named `yoga-tablet`, and older installations
 
 ## Configuration
 
-Use the Caelestia Plugins page for rotation thresholds, auto-rotation policy, on-screen keyboard options, and folded-input policy. The Rotation quick control is permanently split: the left side resumes accelerometer-driven rotation, while each tap on the right side forces the next 90-degree orientation and holds it. Display, touchscreen/pen and touchpad pointer axes are updated together. A specific monitor can be selected where automatic internal-panel detection is not suitable.
+Use the Caelestia Plugins page for rotation thresholds, auto-rotation policy, on-screen keyboard options, and folded-input policy. The Rotation quick control is permanently split: the left side resumes accelerometer-driven rotation, while each tap on the right side forces the next 90-degree orientation and holds it. Display, touchscreen/pen and the built-in laptop touchpad axes are updated together; external USB/Bluetooth pointers are intentionally excluded. A specific monitor can be selected where automatic internal-panel detection is not suitable.
 
 ## Keyboard
 
