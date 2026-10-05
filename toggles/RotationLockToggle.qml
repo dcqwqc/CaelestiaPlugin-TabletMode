@@ -5,7 +5,7 @@ import qs.services
 import dcqwqc.tabletmode.services as RotationPlugin
 
 // Permanently split rotation control:
-// left = automatic sensor rotation
+// left = toggle sensor auto-rotation on/off
 // right = force the next 90° orientation and hold it
 StyledRect {
     id: root
@@ -85,7 +85,7 @@ StyledRect {
             rect.bottomRightRadius: root.innerRadius
             onClicked: {
                 if (!RotationPlugin.RotationLock.rotationChanging)
-                    RotationPlugin.RotationLock.setAutomatic();
+                    RotationPlugin.RotationLock.toggleAutomatic();
             }
         }
 

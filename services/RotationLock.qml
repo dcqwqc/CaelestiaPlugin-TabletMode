@@ -45,6 +45,21 @@ Singleton {
         runRotationAction("auto");
     }
 
+    function holdCurrent(): void {
+        if (rotationChanging)
+            return;
+        rotationChanging = true;
+        rotationAction.command = [root.bin, "lock"];
+        rotationAction.running = true;
+    }
+
+    function toggleAutomatic(): void {
+        if (root.locked)
+            setAutomatic();
+        else
+            holdCurrent();
+    }
+
     function forceNext(): void {
         runRotationAction("next");
     }

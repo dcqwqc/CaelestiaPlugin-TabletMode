@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+SRC="$ROOT/native/touchpad-rotate.cpp"
+BUILD_DIR="$HOME/.cache/yoga-tablet"
+OUT="$BUILD_DIR/touchpad-rotate.so"
+STAMP="$BUILD_DIR/touchpad-rotate.stamp"
+VERSION_HEADER="/usr/include/hyprland/src/version.h"
+
+mkdir -p "$BUILD_DIR"
+
+if ! command -v c++ >/dev/null || ! command -v pkg-config >/dev/null || ! pkg-config --exists hyprland; then
+    echo "Hyprland plugin build dependencies are unavailable" >&2
+    exit 2
+fi
+
+KEY="$(
+    {
+        sha256sum "$SRC"
+        if [[ -r "$VERSION_HEADER" ]]; then
+            sha256sum "$VERSION_HEADER"
+        else
+            hyprctl version 2>/dev/null || true
+        fi
+        c++ --version | head -1
+    } | sha256sum | awk '{print $1}'
+)"
+
+if [[ ! -f "$OUT" || ! -f "$STAMP" || "$(cat "$STAMP" 2>/dev/null || true)" != "$KEY" ]]; then
+    TMP="$OUT.tmp"
+    c++ -std=c++23 -O2 -shared -fPIC --no-gnu-unique \
+        $(pkg-config --cflags hyprland) \
+        "$SRC" -o "$TMP"
+    mv "$TMP" "$OUT"
+    printf '%s\n' "$KEY" > "$STAMP"
+fi
+
+printf '%s\n' "$OUT"

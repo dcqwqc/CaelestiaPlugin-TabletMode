@@ -68,6 +68,10 @@ OSK_PID_PATH = RUNTIME_DIR / f"{APP}-wvkbd.pid"
 HANDLE_PID_PATH = RUNTIME_DIR / f"{APP}-handle.pid"
 CAPTURE_TRANSFORM_PATH = RUNTIME_DIR / f"{APP}-capture-transform"
 IIO_ROOT = Path("/sys/bus/iio/devices")
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+TOUCHPAD_HOOK_BUILD = PLUGIN_ROOT / "scripts" / "build-touchpad-hook"
+TOUCHPAD_HOOK_NAME = "tabletmode-touchpad-rotate"
+TOUCHPAD_HOOK_DISPATCH = "tabletmode-touchpad-transform"
 # Caelestia rewrites this whenever the colour scheme or light/dark mode changes.
 SCHEME_PATH = (
     Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
@@ -611,32 +615,56 @@ def _hypr_input_name(name: str) -> str:
 
 
 def internal_touchpad_names() -> list[str]:
-    """Return only built-in touchpads; never rotate Bluetooth/USB pointers."""
+    """Return only touchpads that udev marks as physically integrated."""
     internal = set()
     for event in Path("/sys/class/input").glob("event*"):
         try:
             kernel_name = (event / "device" / "name").read_text().strip()
-            device_path = str((event / "device").resolve()).lower()
         except OSError:
             continue
         if "touchpad" not in kernel_name.lower():
             continue
-        # Mirai's ELAN pad is I2C. serio/platform cover the common other
-        # built-in laptop paths while deliberately excluding USB/Bluetooth.
-        if not any(marker in device_path for marker in ("/i2c-", "/serio", "/platform/")):
+
+        props = {}
+        try:
+            out = subprocess.run(
+                ["udevadm", "info", "-q", "property", "-p", str(event)],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if out.returncode == 0:
+                for line in out.stdout.splitlines():
+                    if "=" in line:
+                        key, value = line.split("=", 1)
+                        props[key] = value
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+        if props.get("ID_INPUT_TOUCHPAD_INTEGRATION") == "internal":
+            internal.add(_hypr_input_name(kernel_name))
             continue
-        internal.add(_hypr_input_name(kernel_name))
+
+        # Conservative fallback for systems whose udev rules predate the
+        # integration property. USB/Bluetooth paths are deliberately excluded.
+        try:
+            device_path = str((event / "device").resolve()).lower()
+        except OSError:
+            continue
+        if props.get("ID_BUS") in ("usb", "bluetooth"):
+            continue
+        if any(marker in device_path for marker in ("/i2c-", "/serio", "/platform/")):
+            internal.add(_hypr_input_name(kernel_name))
 
     devices = hyprctl_json("devices")
     if not devices or not internal:
         return []
 
-    names = []
-    for dev in devices.get("mice") or []:
-        name = dev.get("name") or ""
-        if _hypr_input_name(name) in internal:
-            names.append(name)
-    return names
+    return [
+        dev.get("name") or ""
+        for dev in devices.get("mice") or []
+        if _hypr_input_name(dev.get("name") or "") in internal
+    ]
 
 
 def pointer_names() -> list[str]:
@@ -1437,6 +1465,7 @@ class Daemon:
         self._keyboard_original_frame: tuple[str, int] | None = None
         self.rotation_locked = False
         self.transform = self._current_transform()
+        self._touchpad_hook_ready = False
         # A fresh compositor/input enumeration can reset relative pointer
         # rotation. Reconcile the built-in touchpad with the inherited display.
         self._sync_touchpad_rotation(self.transform, reason="startup")
@@ -1461,29 +1490,117 @@ class Daemon:
         except (TypeError, ValueError):
             return NORMAL
 
-    def _touchpad_rotation_lines(self, transform: int) -> list[str]:
-        """Rotate only the laptop's built-in touchpad with the physical panel."""
-        # Hyprland pointer rotation is clockwise. These four values provide the
-        # exact vector mapping we want:
-        #   0°   : up→up,       right→right
-        #   90°  : up→right,    right→down
-        #   180° : up→down,     right→left
-        #   270° : up→left,     right→up   (shown in the UI as -90°)
-        degrees = (transform % 4) * 90
-        return [
-            f"hl.device({{ name = {lua_str(dev)}, rotation = {degrees} }})"
-            for dev in internal_touchpad_names()
-        ]
+    def _touchpad_hook_loaded(self) -> bool:
+        try:
+            out = subprocess.run(
+                ["hyprctl", "plugin", "list"],
+                capture_output=True,
+                text=True,
+                timeout=4,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return out.returncode == 0 and TOUCHPAD_HOOK_NAME in out.stdout
+
+    def _ensure_touchpad_hook(self) -> bool:
+        if self._touchpad_hook_ready:
+            return True
+
+        loaded_before = self._touchpad_hook_loaded()
+        so_path = Path.home() / ".cache" / "yoga-tablet" / "touchpad-rotate.so"
+        try:
+            old_mtime = so_path.stat().st_mtime_ns
+        except OSError:
+            old_mtime = None
+
+        try:
+            build = subprocess.run(
+                [str(TOUCHPAD_HOOK_BUILD)],
+                capture_output=True,
+                text=True,
+                timeout=45,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            log(f"touchpad motion hook build failed: {exc}")
+            return False
+
+        if build.returncode != 0:
+            log(f"touchpad motion hook build failed: {build.stderr.strip()}")
+            return False
+
+        built_path = build.stdout.strip().splitlines()[-1] if build.stdout.strip() else ""
+        if not built_path:
+            log("touchpad motion hook build returned no plugin path")
+            return False
+        so_path = Path(built_path).resolve()
+
+        try:
+            new_mtime = so_path.stat().st_mtime_ns
+        except OSError:
+            log(f"touchpad motion hook build did not create {so_path}")
+            return False
+
+        # If an updated .so was rebuilt while Hyprland still had the old image
+        # mapped, unload it before loading the new code. Normal restarts skip
+        # this because the content-addressed build leaves the mtime unchanged.
+        if loaded_before and (old_mtime is None or new_mtime != old_mtime):
+            subprocess.run(
+                ["hyprctl", "plugin", "unload", str(so_path)],
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+            loaded_before = False
+
+        if not loaded_before:
+            try:
+                load = subprocess.run(
+                    ["hyprctl", "plugin", "load", str(so_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                log(f"touchpad motion hook load failed: {exc}")
+                return False
+
+            if load.returncode != 0:
+                log(f"touchpad motion hook load failed: {(load.stdout + load.stderr).strip()}")
+                return False
+
+        if not self._touchpad_hook_loaded():
+            log("touchpad motion hook did not appear in Hyprland plugin list")
+            return False
+
+        self._touchpad_hook_ready = True
+        return True
 
     def _sync_touchpad_rotation(self, transform: int, reason: str = "") -> bool:
-        lines = self._touchpad_rotation_lines(transform)
-        if not lines:
+        """Rotate post-libinput motion for integrated touchpads only."""
+        names = internal_touchpad_names()
+        if not names:
             return True
-        if not hypr_eval_lua("\n".join(lines) + "\n"):
-            log("could not align touchpad rotation with display")
+        if not self._ensure_touchpad_hook():
             return False
+
+        arg = " ".join([str(transform % 4), *names])
+        try:
+            out = subprocess.run(
+                ["hyprctl", "dispatch", TOUCHPAD_HOOK_DISPATCH, arg],
+                capture_output=True,
+                text=True,
+                timeout=4,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            log(f"could not align internal touchpad motion: {exc}")
+            return False
+
+        if out.returncode != 0 or (out.stdout or "").strip().lower().startswith("error"):
+            log(f"could not align internal touchpad motion: {(out.stdout + out.stderr).strip()}")
+            return False
+
         log(
-            f"internal touchpad rotation -> {(transform % 4) * 90} deg"
+            f"internal touchpad motion -> {(transform % 4) * 90} deg"
             f"{' (' + reason + ')' if reason else ''}"
         )
         return True
@@ -1506,20 +1623,20 @@ class Daemon:
                 t=transform,
             )
         ]
-        # Absolute digitizers and relative touchpad motion both follow the
-        # physical panel. Hyprland uses transforms for touch/pen and clockwise
-        # degrees for pointer rotation.
+        # Absolute digitizers follow the physical panel in the same monitor
+        # transaction. Relative touchpad motion is handled after libinput by the
+        # tiny native hook because this ELAN pad exposes no libinput rotation or
+        # calibration matrix capability.
         for dev in digitizer_names():
             lines.append(
                 f"hl.device({{ name = {lua_str(dev)}, transform = {transform} }})"
             )
-        lines.extend(self._touchpad_rotation_lines(transform))
-
         if not hypr_eval_lua("\n".join(lines) + "\n"):
             return "compositor rejected the rotation"
 
         self.transform = transform
         write_capture_transform(self.transform)
+        self._sync_touchpad_rotation(self.transform, reason=reason or "display")
         log(f"transform -> {transform * 90} deg{' (' + reason + ')' if reason else ''}")
         self.osk.reflow()
         # Portrait and landscape keyboards are different heights, so the strip
@@ -1585,10 +1702,13 @@ class Daemon:
             if y >= thr:
                 return "bottom-up"
         else:
+            # Linux IIO screen coordinates: +X means the right edge is up and
+            # -X means the left edge is up. The old mapping had these reversed,
+            # which made every automatic 90° turn go the opposite direction.
             if x >= thr:
-                return "left-up" if not self.cfg.get("invert_sides") else "right-up"
-            if x <= -thr:
                 return "right-up" if not self.cfg.get("invert_sides") else "left-up"
+            if x <= -thr:
+                return "left-up" if not self.cfg.get("invert_sides") else "right-up"
         return self.orientation
 
     def sample_orientation(self) -> str:
