@@ -16,6 +16,21 @@ The plugin provides:
 
 Hardware selection is not tied to a particular laptop model. The runtime discovers the internal display from common internal-panel connector types and uses Hyprland's main-keyboard and touchpad device information instead of vendor-specific input names.
 
+## Ghostty direct-touch scrolling
+
+TabletMode owns the direct-touch terminal compatibility layer too. When Ghostty
+is focused, a single vertical touchscreen drag is translated into discrete wheel
+scrolling while Hyprland keeps native touch ownership. The translator preserves
+the old direct-manipulation feel: roughly one terminal row follows one row of
+finger travel, horizontal movement does not accidentally commit a scroll, and
+release velocity drives a short inertial tail. Two-finger and other native touch
+input is left alone.
+
+The implementation lives in `scripts/ghostty-touch-scroll` and is started by
+`Main.qml`, so installing/enabling TabletMode is sufficient; there is no separate
+`kitty-touch-scroll.service` or copied helper under `~/.local/bin`. The helper
+only activates while the active Hyprland window class contains `ghostty`.
+
 ## Touch-friendly bar popouts
 
 Caelestia's status popouts are normally hover-driven. TabletMode adds a

@@ -18,6 +18,7 @@ Item {
     // This keeps installs from Nexus, git clone, or a custom plugin path identical.
     readonly property string bin: Paths.toLocalFile(Qt.resolvedUrl("scripts/yoga-tablet"))
     readonly property string touchIntegrationBin: Paths.toLocalFile(Qt.resolvedUrl("scripts/ensure-touch-popouts"))
+    readonly property string terminalTouchBin: Paths.toLocalFile(Qt.resolvedUrl("scripts/ghostty-touch-scroll"))
 
     // Keep the tiny Caelestia interaction hook owned by this plugin.
     // The helper is idempotent and refuses to guess after incompatible upstream changes.
@@ -25,6 +26,27 @@ Item {
         id: touchIntegration
         command: [root.touchIntegrationBin]
         running: true
+    }
+
+    // Ghostty currently does not provide the direct-touch behavior we want on
+    // Mirai. Keep the passive one-finger scroll translator plugin-owned so a
+    // fresh TabletMode install gets anchored finger scrolling + release inertia
+    // without a separate ~/.local/bin helper or systemd unit.
+    Process {
+        id: terminalTouch
+        command: [root.terminalTouchBin]
+        running: true
+        onExited: terminalTouchRestart.restart()
+    }
+
+    Timer {
+        id: terminalTouchRestart
+        interval: 1200
+        repeat: false
+        onTriggered: {
+            if (!terminalTouch.running)
+                terminalTouch.running = true;
+        }
     }
 
     Process {
