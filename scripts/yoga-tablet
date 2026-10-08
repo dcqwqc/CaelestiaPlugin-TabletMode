@@ -151,11 +151,11 @@ ORIENTATION_TRANSFORM = {
 TRANSFORM_ORIENTATION = {transform: orientation for orientation, transform in ORIENTATION_TRANSFORM.items()}
 
 # Some convertibles mount the IIO accelerometer rotated relative to the panel.
-# Mirai (Lenovo Yoga 7 2-in-1 14IML9, machine type 83DJ) reports +X gravity in
-# the ordinary landscape laptop pose, i.e. the sensor frame is one quarter-turn
-# behind the display frame.
+# Mirai (Lenovo Yoga 7 2-in-1 14IML9, 83DJ) reports -Y gravity in
+# ordinary landscape, matching iio-sensor-proxy's "normal" orientation.
+# The previous extra 90-degree offset incorrectly forced portrait at login.
 SENSOR_MOUNT_QUIRKS = {
-    ("LENOVO", "83DJ"): 1,
+    ("LENOVO", "83DJ"): 0,
 }
 
 
@@ -1544,8 +1544,6 @@ class Daemon:
         self.sensor_proxy = SensorProxy()
         self.sensor_source = "starting"
         self.proxy_orientation: str | None = None
-        self._proxy_baseline_orientation: str | None = None
-        self._proxy_baseline_transform = 0
         self.osk = Osk(cfg)
         self.grab = Handle(cfg)
         self.motion = MotionServer(self.osk)
@@ -1564,7 +1562,6 @@ class Daemon:
         self._keyboard_original_frame: tuple[str, int] | None = None
         self.rotation_locked = False
         self.transform = self._current_transform()
-        self._proxy_baseline_transform = self.transform
         self._touchpad_hook_ready = False
         # A fresh compositor/input enumeration can reset relative pointer
         # rotation. Reconcile the built-in touchpad with the inherited display.
@@ -1576,6 +1573,7 @@ class Daemon:
         self.orientation = TRANSFORM_ORIENTATION.get(self.transform, "normal")
         self._candidate: str | None = None
         self._candidate_hits = 0
+        self._orientation_sampled = False
         # Last measured keyboard offset, per orientation.
         self._osk_offsets: dict[tuple[int, bool], int] = {}
 
@@ -1830,31 +1828,36 @@ class Daemon:
         return orientation
 
     def orientation_from_proxy(self, raw_orientation: str) -> str:
-        """Map live proxy orientation by relative movement, not mount angle."""
-        raw_transform = ORIENTATION_TRANSFORM.get(raw_orientation)
-        if raw_transform is None:
-            return self.orientation
+        """Use the proxy's absolute panel orientation, not a stale baseline.
 
-        if self._proxy_baseline_orientation is None:
-            self._proxy_baseline_orientation = raw_orientation
-            self._proxy_baseline_transform = self.transform
-            log(
-                "live sensor baseline: "
-                f"{raw_orientation} -> {self.transform * 90} deg"
-            )
-            return TRANSFORM_ORIENTATION[self.transform]
-
-        baseline_raw = ORIENTATION_TRANSFORM[self._proxy_baseline_orientation]
-        delta = (raw_transform - baseline_raw) % 4
-        target = (self._proxy_baseline_transform + delta) % 4
-        orientation = TRANSFORM_ORIENTATION[target]
-
+        The old relative baseline used the compositor's initial rotation as
+        zero. If a previous session left it in portrait, a physically upright
+        "normal" sensor reading was interpreted as portrait forever.
+        iio-sensor-proxy already applies the firmware's mount matrix.
+        """
+        orientation = (
+            raw_orientation
+            if raw_orientation in ORIENTATION_TRANSFORM
+            else self.orientation
+        )
         if self.cfg.get("invert_sides"):
             if orientation == "left-up":
                 orientation = "right-up"
             elif orientation == "right-up":
                 orientation = "left-up"
         return orientation
+
+    def reconcile_transform(self, reason: str = "sensor sync") -> None:
+        """Restore the correct orientation after compositor reconfiguration.
+
+        Comparing only against self.transform would miss Hyprland resetting the
+        output after our last sensor event. Respect a manual rotation lock.
+        """
+        if not self.rotation_active():
+            return
+        target = ORIENTATION_TRANSFORM[self.orientation]
+        if target != self._current_transform() or target != self.transform:
+            self.apply_transform(target, reason=reason)
 
     def sample_orientation(self) -> str:
         """Refresh orientation synchronously for user-triggered unlocks."""
@@ -1863,6 +1866,7 @@ class Daemon:
             self.sensor_source = "iio-sensor-proxy"
             self.proxy_orientation = proxy
             self.orientation = self.orientation_from_proxy(proxy)
+            self._orientation_sampled = True
         else:
             self.sensor_source = "sysfs-fallback"
             if self.accel.base is None:
@@ -1873,6 +1877,7 @@ class Daemon:
                 g = self.accel.read_g()
             if g is not None:
                 self.orientation = self.orientation_from(g)
+                self._orientation_sampled = True
         self._candidate, self._candidate_hits = None, 0
         return self.orientation
 
@@ -1883,6 +1888,7 @@ class Daemon:
         missing_ticks = rediscover_every
         missing_logged = False
         proxy_logged = False
+        next_reconcile = time.monotonic() + 2.0
 
         while not self.stopping.wait(interval):
             proxy = self.sensor_proxy.read()
@@ -1935,6 +1941,11 @@ class Daemon:
             with self.lock:
                 if candidate == self.orientation:
                     self._candidate, self._candidate_hits = None, 0
+                    # Restore orientation after display-rule reload or wakeup,
+                    # even without another change in the gravity vector.
+                    if time.monotonic() >= next_reconcile:
+                        next_reconcile = time.monotonic() + 2.0
+                        self.reconcile_transform("compositor sync")
                     continue
                 if candidate == self._candidate:
                     self._candidate_hits += 1
@@ -2570,6 +2581,12 @@ class Daemon:
         # and the bottom-left keyboard handle disappeared until the hinge moved.
         if self.initial_tablet_mode is not None:
             self.set_tablet_mode(self.initial_tablet_mode, announce=False)
+
+        # Correct inherited portrait before the first stable poll interval.
+        # Hardware orientation, not the previous transform, decides at startup.
+        self.sample_orientation()
+        if self._orientation_sampled:
+            self.reconcile_transform("startup sensor")
 
         poller = threading.Thread(target=self.poll_loop, daemon=True)
         poller.start()
