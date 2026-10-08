@@ -28,7 +28,7 @@ input is left alone.
 
 The implementation lives in `scripts/ghostty-touch-scroll` and is started by
 `Main.qml`, so installing/enabling TabletMode is sufficient; there is no separate
-`kitty-touch-scroll.service` or copied helper under `~/.local/bin`. The helper
+legacy terminal-touch service or copied helper under `~/.local/bin`. The helper
 only activates while the active Hyprland window class contains `ghostty`.
 
 ## Touch-friendly bar popouts
