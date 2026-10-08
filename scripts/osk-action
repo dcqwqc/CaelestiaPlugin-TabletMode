@@ -66,6 +66,43 @@ def clipboard_list(filter_text: str) -> int:
     return emit({"available": True, "items": items})
 
 
+def paste_shortcut() -> bool:
+    """Send Ctrl+V via uinput in SUMI, where wtype events can be lost."""
+    try:
+        active = subprocess.run(
+            ["hyprctl", "activewindow", "-j"], capture_output=True,
+            text=True, timeout=0.4, check=False,
+        )
+        is_sumi = json.loads(active.stdout or "{}").get("class", "").lower() == "sumi"
+    except (OSError, ValueError, subprocess.SubprocessError):
+        is_sumi = False
+
+    socket_path = f"/run/user/{os.getuid()}/.ydotool_socket"
+    if is_sumi and shutil.which("ydotool") and Path(socket_path).is_socket():
+        env = os.environ.copy()
+        env["YDOTOOL_SOCKET"] = socket_path
+        try:
+            result = subprocess.run(
+                ["ydotool", "key", "29:1", "47:1", "47:0", "29:0"],
+                check=False, timeout=2, env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            if result.returncode == 0:
+                return True
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    try:
+        result = subprocess.run(
+            ["wtype", "-M", "ctrl", "-k", "v", "-m", "ctrl"],
+            check=False, timeout=2,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def clipboard_paste(clip_id: str) -> int:
     if not clipboard_available() or not re.fullmatch(r"\d+", clip_id):
         return 1
@@ -79,10 +116,7 @@ def clipboard_paste(clip_id: str) -> int:
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if copied.returncode != 0:
             return 1
-        pasted = subprocess.run(["wtype", "-M", "ctrl", "-k", "v", "-m", "ctrl"],
-                                check=False, timeout=2, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL)
-        return 0 if pasted.returncode == 0 else 1
+        return 0 if paste_shortcut() else 1
     except (OSError, subprocess.SubprocessError):
         return 1
 
@@ -182,10 +216,7 @@ def paste_text(text: str) -> int:
                                     input=text.encode("utf-8"), check=False, timeout=2,
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if copied.returncode == 0:
-                pasted = subprocess.run(["wtype", "-M", "ctrl", "-k", "v", "-m", "ctrl"],
-                                        check=False, timeout=2, stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL)
-                if pasted.returncode == 0:
+                if paste_shortcut():
                     return 0
         # Some fullscreen/Wayland clients ignore a synthetic Ctrl+V even though
         # wl-copy succeeded. Fall back to wtype's direct text path instead of
