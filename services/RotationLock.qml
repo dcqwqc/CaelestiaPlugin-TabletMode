@@ -46,7 +46,9 @@ Singleton {
     }
 
     function setAutomatic(): void {
-        runRotationAction("auto");
+        // Respect the angle chosen with Force as the calibration baseline
+        // when re-entering Auto; an old proxy "normal" must not undo it.
+        runRotationAction("align-auto");
     }
 
     function holdCurrent(): void {

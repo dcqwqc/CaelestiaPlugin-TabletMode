@@ -422,7 +422,7 @@ def load_plugin_config() -> dict:
     return mapped
 
 
-def save_plugin_setting(name: str, value) -> None:
+def save_plugin_setting(name: str, value) -> bool:
     """Persist one user-facing setting without creating a second config source."""
     try:
         with PLUGIN_SETTINGS_PATH.open() as fh:
@@ -433,7 +433,7 @@ def save_plugin_setting(name: str, value) -> None:
         data = {}
     except (OSError, ValueError) as exc:
         log(f"cannot update plugin settings {PLUGIN_SETTINGS_PATH}: {exc}")
-        return
+        return False
 
     settings = data.setdefault("settings", {})
     if not isinstance(settings, dict):
@@ -450,12 +450,14 @@ def save_plugin_setting(name: str, value) -> None:
             json.dump(data, fh, indent=4)
             fh.write("\n")
         tmp.replace(PLUGIN_SETTINGS_PATH)
+        return True
     except OSError as exc:
         log(f"cannot save plugin settings {PLUGIN_SETTINGS_PATH}: {exc}")
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
+        return False
 
 
 def load_config() -> dict:
@@ -1799,7 +1801,7 @@ class Daemon:
             return self.tablet_mode
         return True
 
-    def orientation_from(self, g: tuple[float, float, float]) -> str:
+    def orientation_from(self, g: tuple[float, float, float], *, calibrated: bool = True) -> str:
         x, y, z = g
         thr = float(self.cfg.get("threshold_g", 0.55))
         flat = float(self.cfg.get("flat_threshold_g", 0.80))
@@ -1831,11 +1833,11 @@ class Daemon:
         # side-lying auto rotation therefore still works in ordinary laptop mode.
         transform = (
             ORIENTATION_TRANSFORM[raw_orientation] + sensor_mount_quarters()
-            + sensor_offset_quarters(self.cfg)
+            + (sensor_offset_quarters(self.cfg) if calibrated else 0)
         ) % 4
         orientation = TRANSFORM_ORIENTATION[transform]
 
-        if self.cfg.get("invert_sides"):
+        if calibrated and self.cfg.get("invert_sides"):
             if orientation == "left-up":
                 orientation = "right-up"
             elif orientation == "right-up":
@@ -1865,15 +1867,44 @@ class Daemon:
                 orientation = "left-up"
         return orientation
 
+    def sensor_base_transform(self) -> int | None:
+        """Read an uncalibrated absolute sensor direction for user alignment.
+
+        Never infer a new calibration from the previously applied output:
+        otherwise the old incorrect transform becomes its own reference.
+        """
+        proxy = self.sensor_proxy.read()
+        if proxy in ORIENTATION_TRANSFORM:
+            return ORIENTATION_TRANSFORM[proxy]
+        if self.accel.base is None:
+            self.accel.rediscover()
+        g = self.accel.read_g()
+        if g is None:
+            return None
+        x, y, z = g
+        threshold = float(self.cfg.get("threshold_g", 0.55))
+        flat = float(self.cfg.get("flat_threshold_g", 0.80))
+        if abs(z) > flat and abs(x) < threshold and abs(y) < threshold:
+            return None
+        # Apply the firmware's raw-axis mount correction, but not the current
+        # manual 0/90/180/270 calibration or portrait-side inversion.
+        return ORIENTATION_TRANSFORM[self.orientation_from(g, calibrated=False)]
+
     def reconcile_transform(self, reason: str = "sensor sync") -> None:
         """Restore the correct orientation after compositor reconfiguration.
 
         Comparing only against self.transform would miss Hyprland resetting the
         output after our last sensor event. Respect a manual rotation lock.
         """
-        if not self.rotation_active():
+        # A compositor reload, another display plugin or a monitor hotplug can
+        # overwrite a forced angle too. The rotation lock means hold that angle,
+        # not "stop defending the compositor's current output transform".
+        if self.rotation_locked:
+            target = self.transform
+        elif self.rotation_active():
+            target = ORIENTATION_TRANSFORM[self.orientation]
+        else:
             return
-        target = ORIENTATION_TRANSFORM[self.orientation]
         if target != self._current_transform() or target != self.transform:
             self.apply_transform(target, reason=reason)
 
@@ -2349,6 +2380,7 @@ class Daemon:
                     "accelerometer": str(self.accel.base) if self.accel.base else None,
                     "invert_sides": bool(self.cfg.get("invert_sides")),
                     "sensor_mount_quarters": sensor_mount_quarters(),
+                    "sensor_offset_degrees": self.cfg.get("sensor_offset_degrees", 0),
                     "sensor_source": self.sensor_source,
                     "sensor_proxy_orientation": self.proxy_orientation,
                     "auto_rotation_active": self.rotation_active(),
@@ -2372,7 +2404,24 @@ class Daemon:
 
         if cmd == "rotate":
             with self.lock:
-                if arg == "auto":
+                if arg == "align-auto":
+                    # Turn the last user-forced angle into an absolute
+                    # sensor-to-panel reference, then resume live sensor mode.
+                    # This is an explicit UI action and persists across reboot.
+                    base = self.sensor_base_transform()
+                    if base is None:
+                        return {"ok": False, "error": "no valid live orientation sensor; keeping manual rotation"}
+                    desired = self.transform
+                    if self.cfg.get("invert_sides") and desired in (ROT_90, ROT_270):
+                        desired = (-desired) % 4
+                    offset = (desired - base) % 4
+                    if not save_plugin_setting("sensorOffsetDegrees", offset * 90):
+                        return {"ok": False, "error": "failed to persist sensor calibration; keeping manual rotation"}
+                    self.cfg["sensor_offset_degrees"] = offset * 90
+                    self.rotation_locked = False
+                    self.sample_orientation()
+                    target = ORIENTATION_TRANSFORM[self.orientation]
+                elif arg == "auto":
                     self.rotation_locked = False
                     # Auto is a direct user action: sample now so it responds
                     # to the current physical pose instead of stale poll state.
@@ -2385,7 +2434,7 @@ class Daemon:
                     try:
                         target = int(arg) % 4
                     except (TypeError, ValueError):
-                        return {"ok": False, "error": "rotate takes 0|1|2|3|next|auto"}
+                        return {"ok": False, "error": "rotate takes 0|1|2|3|next|auto|align-auto"}
                     # An explicit angle is a manual choice; hold it.
                     self.rotation_locked = True
                 err = self.apply_transform(target, reason="manual")
@@ -2543,6 +2592,7 @@ class Daemon:
         if cmd == "reload":
             with self.lock:
                 was_active = self.rotation_active()
+                old_sensor_offset = self.cfg.get("sensor_offset_degrees", 0)
                 self.cfg.update(load_config())
                 self.osk.cfg = self.cfg
                 self.osk._flags = None
@@ -2551,7 +2601,8 @@ class Daemon:
                 self._sync_touchpad_rotation(self.transform, reason="reload")
                 self.sync_handle()
                 now_active = self.rotation_active()
-                if now_active and not was_active:
+                if now_active and (not was_active or
+                                   self.cfg.get("sensor_offset_degrees", 0) != old_sensor_offset):
                     self.sample_orientation()
                     target = ORIENTATION_TRANSFORM[self.orientation]
                     if target != self.transform:
@@ -2687,7 +2738,7 @@ def main() -> int:
         "angle",
         nargs="?",
         default="next",
-        help="0|1|2|3 (quarter turns), 'next', or 'auto' to resume the sensor",
+        help="0|1|2|3 (quarter turns), next, auto, or align-auto to calibrate current angle and resume sensor",
     )
 
     sub.add_parser("lock", help="hold the current rotation")
