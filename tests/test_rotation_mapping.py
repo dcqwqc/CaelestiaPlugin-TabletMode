@@ -12,6 +12,7 @@ class DummyDaemon:
         "threshold_g": 0.55,
         "flat_threshold_g": 0.80,
         "invert_sides": False,
+        "sensor_offset_degrees": 0,
     }
     orientation = "normal"
 
@@ -42,18 +43,35 @@ class RotationMappingTests(unittest.TestCase):
         self.assertEqual(orientation_from(dummy, (0.0, 1.0, 0.0)), "right-up")
 
 
-    def test_live_proxy_relative_mapping_ignores_mount_offset(self):
+    def test_proxy_is_absolute_and_not_relative_to_old_display_state(self):
         dummy = DummyDaemon()
-        dummy.transform = 0
-        dummy.orientation = "normal"
-        dummy._proxy_baseline_orientation = None
-        dummy._proxy_baseline_transform = 0
-
+        dummy.transform = 3  # compositor was left in portrait
         orientation_from_proxy = Daemon.orientation_from_proxy
-        self.assertEqual(orientation_from_proxy(dummy, "left-up"), "normal")
-        self.assertEqual(orientation_from_proxy(dummy, "bottom-up"), "left-up")
-        self.assertEqual(orientation_from_proxy(dummy, "right-up"), "bottom-up")
-        self.assertEqual(orientation_from_proxy(dummy, "normal"), "right-up")
+        for orientation in ("normal", "left-up", "bottom-up", "right-up"):
+            self.assertEqual(orientation_from_proxy(dummy, orientation), orientation)
+
+    def test_180_degree_user_calibration_applies_to_both_sensor_backends(self):
+        dummy = DummyDaemon()
+        dummy.cfg = dict(dummy.cfg, sensor_offset_degrees=180)
+        raw = Daemon.orientation_from
+        proxy = Daemon.orientation_from_proxy
+        self.assertEqual(raw(dummy, (0.0, -1.0, 0.0)), "bottom-up")
+        self.assertEqual(proxy(dummy, "normal"), "bottom-up")
+        self.assertEqual(raw(dummy, (0.0, 1.0, 0.0)), "normal")
+        self.assertEqual(proxy(dummy, "bottom-up"), "normal")
+        self.assertEqual(raw(dummy, (-1.0, 0.0, 0.0)), "right-up")
+        self.assertEqual(proxy(dummy, "left-up"), "right-up")
+
+    def test_invalid_calibration_is_rejected_without_rotation(self):
+        dummy = DummyDaemon()
+        for bad in (45, 360, "xyz", None):
+            dummy.cfg = dict(dummy.cfg, sensor_offset_degrees=bad)
+            self.assertEqual(Daemon.orientation_from_proxy(dummy, "normal"), "normal")
+
+    def test_sensor_calibration_and_portrait_side_swap(self):
+        dummy = DummyDaemon()
+        dummy.cfg = dict(dummy.cfg, sensor_offset_degrees=90, invert_sides=True)
+        self.assertEqual(Daemon.orientation_from_proxy(dummy, "normal"), "right-up")
 
     def test_auto_rotation_scope(self):
         dummy = DummyDaemon()

@@ -11,6 +11,17 @@ SettingsObject {
         optionIcons: ["devices", "tablet_android", "screen_lock_rotation"]
     }
 
+    property int sensorOffsetDegrees: 0
+    SettingMeta on sensorOffsetDegrees {
+        label: "Sensor orientation correction"
+        description: "Calibration of the automatic rotation sensor relative to the screen. Use 180° if Auto turns an upright display upside down."
+        icon: "screen_rotation"
+        inputType: SettingMeta.SpinBox
+        min: 0
+        max: 270
+        step: 90
+    }
+
     property bool invertSides: false
     SettingMeta on invertSides {
         label: "Swap portrait sides"

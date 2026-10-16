@@ -42,6 +42,7 @@ PLUGIN_ID = "dcqwqc/tabletmode"
 LEGACY_PLUGIN_ID = "dcqwqc/rotationlock"
 PLUGIN_SETTING_MAP = {
     "autoRotate": "auto_rotate",
+    "sensorOffsetDegrees": "sensor_offset_degrees",
     "invertSides": "invert_sides",
     "thresholdG": "threshold_g",
     "stableSamples": "stable_samples",
@@ -167,12 +168,26 @@ def sensor_mount_quarters() -> int:
         return 0
     return SENSOR_MOUNT_QUIRKS.get((vendor, product), 0)
 
+def sensor_offset_quarters(cfg: dict) -> int:
+    """User calibration shared by raw IIO and firmware-corrected proxy readings.
+
+    The proxy already compensates firmware mounting; its reading must not also
+    inherit the raw IIO mount quirk. This offset only corrects the observed
+    sensor-to-panel mismatch and remains 0 for other machines by default.
+    """
+    try:
+        degrees = int(cfg.get("sensor_offset_degrees", 0))
+    except (TypeError, ValueError):
+        return 0
+    return degrees // 90 if degrees in (0, 90, 180, 270) else 0
+
 
 DEFAULTS = {
     # Which panel to rotate. "auto" picks the first internal (eDP-*) output.
     "monitor": "auto",
     # "always" | "tablet" (only while folded) | "never"
     "auto_rotate": "always",
+    "sensor_offset_degrees": 0,  # 0|90|180|270: user panel calibration
     "poll_interval": 0.25,
     # Fraction of g along an axis needed to commit to that side.
     "threshold_g": 0.55,
@@ -1816,6 +1831,7 @@ class Daemon:
         # side-lying auto rotation therefore still works in ordinary laptop mode.
         transform = (
             ORIENTATION_TRANSFORM[raw_orientation] + sensor_mount_quarters()
+            + sensor_offset_quarters(self.cfg)
         ) % 4
         orientation = TRANSFORM_ORIENTATION[transform]
 
@@ -1840,6 +1856,8 @@ class Daemon:
             if raw_orientation in ORIENTATION_TRANSFORM
             else self.orientation
         )
+        transform = (ORIENTATION_TRANSFORM[orientation] + sensor_offset_quarters(self.cfg)) % 4
+        orientation = TRANSFORM_ORIENTATION[transform]
         if self.cfg.get("invert_sides"):
             if orientation == "left-up":
                 orientation = "right-up"
