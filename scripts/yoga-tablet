@@ -46,7 +46,6 @@ PLUGIN_SETTING_MAP = {
     "invertSides": "invert_sides",
     "thresholdG": "threshold_g",
     "stableSamples": "stable_samples",
-    "oskHandle": "osk_handle",
     "oskPreload": "osk_preload_in_tablet",
     "oskTheme": "osk_theme",
     "glideEnabled": "glide_enabled",
@@ -241,7 +240,6 @@ DEFAULTS = {
     "osk_preload_in_tablet": True,
     # The bottom-left grab strip that opens the keyboard. See the Handle class
     # for why the gesture cannot simply be bound in hyprgrass.
-    "osk_handle": True,
     # Wide enough to hit without looking. It starts clear of Caelestia's left
     # bar (which reserves 60px) and stops well short of the launcher in the
     # centre of the bottom edge.
@@ -1299,8 +1297,6 @@ class Handle:
         return env
 
     def start(self, monitor: str | None, mode: str = "open", bottom: int = 0) -> None:
-        if not self.cfg.get("osk_handle", True):
-            return
         # The QML watches OSK_STATE_PATH, so changing open/close geometry does
         # not require a Quickshell restart. Keeping this process resident is what
         # lets the toolbar begin its layer animation together with wvkbd.
@@ -2283,8 +2279,7 @@ class Daemon:
                     notify(
                         self.cfg,
                         "Tablet mode",
-                        "Pull the handle at the bottom left up for the keyboard, "
-                        "push it back down to dismiss",
+                        "Press Super+O to show or hide the on-screen keyboard",
                         "tablet_android",
                     )
             else:

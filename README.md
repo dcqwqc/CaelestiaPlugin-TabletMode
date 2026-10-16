@@ -141,3 +141,10 @@ On Hyprland, keeping the wvkbd layer rule at no_anim = true, order = -10 is
 also recommended. The negative order keeps the native surface behind Caelestia's
 other top-layer surfaces, while the hard clip prevents transparent shell regions
 from revealing keyboard pixels during a page transition.
+
+## Keyboard access without a grab handle
+
+The OSK no longer draws a bottom-left opening strip or a drag-to-dismiss
+handle above its toolbar. Press **Super+O** (or use `yoga-tablet osk toggle`)
+to show/hide the keyboard. The tablet daemon keeps the QML utility toolbar
+and clipboard/emoji pager active; no handle setting is exposed.

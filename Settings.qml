@@ -52,14 +52,6 @@ SettingsObject {
         step: 1
     }
 
-    property bool oskHandle: true
-    SettingMeta on oskHandle {
-        label: "Keyboard swipe handle"
-        description: "Shows the bottom-left tablet gesture strip used to pull up the on-screen keyboard."
-        icon: "keyboard"
-        inputType: SettingMeta.Switch
-    }
-
     property bool oskPreload: true
     SettingMeta on oskPreload {
         label: "Preload keyboard in tablet mode"
