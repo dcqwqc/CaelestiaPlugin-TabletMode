@@ -8,13 +8,15 @@ ORIGINAL_SENSOR_MOUNT = Daemon.orientation_from.__globals__["sensor_mount_quarte
 
 
 class DummyDaemon:
-    cfg = {
-        "threshold_g": 0.55,
-        "flat_threshold_g": 0.80,
-        "invert_sides": False,
-        "sensor_offset_degrees": 0,
-    }
-    orientation = "normal"
+    def __init__(self):
+        # Never share mutable sensor settings between separate test instances.
+        self.cfg = {
+            "threshold_g": 0.55,
+            "flat_threshold_g": 0.80,
+            "invert_sides": False,
+            "sensor_offset_degrees": 0,
+        }
+        self.orientation = "normal"
 
 
 class RotationMappingTests(unittest.TestCase):
@@ -72,6 +74,50 @@ class RotationMappingTests(unittest.TestCase):
         dummy = DummyDaemon()
         dummy.cfg = dict(dummy.cfg, sensor_offset_degrees=90, invert_sides=True)
         self.assertEqual(Daemon.orientation_from_proxy(dummy, "normal"), "right-up")
+
+    def test_manual_lock_defends_against_external_monitor_reset(self):
+        dummy = DummyDaemon()
+        dummy.cfg = dict(dummy.cfg, auto_rotate="always")
+        dummy.rotation_locked = True
+        dummy.transform = 3
+        dummy._current_transform = lambda: 0
+        seen = []
+        dummy.apply_transform = lambda angle, reason="": seen.append((angle, reason))
+        Daemon.reconcile_transform(dummy, "display scale reset")
+        self.assertEqual(seen, [(3, "display scale reset")])
+
+    def test_align_auto_calibrates_to_forced_angle(self):
+        from unittest.mock import patch
+        import threading
+        dummy = DummyDaemon()
+        dummy.lock = threading.RLock()
+        dummy.rotation_locked = True
+        dummy.transform = 3
+        dummy.sensor_base_transform = lambda: 0  # proxy normal
+        dummy.sample_orientation = lambda: setattr(dummy, "orientation", "right-up")
+        dummy.apply_transform = lambda angle, reason="": None
+        with patch.dict(Daemon.handle.__globals__,
+                        {"save_plugin_setting": lambda name, value: name == "sensorOffsetDegrees" and value == 270}):
+            result = Daemon.handle(dummy, {"cmd": "rotate", "arg": "align-auto"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(dummy.cfg["sensor_offset_degrees"], 270)
+        self.assertEqual(dummy.transform, 3)
+        self.assertFalse(dummy.rotation_locked)
+
+    def test_align_auto_fails_safely_without_sensor(self):
+        from unittest.mock import patch
+        import threading
+        dummy = DummyDaemon()
+        dummy.lock = threading.RLock()
+        dummy.rotation_locked = True
+        dummy.transform = 3
+        dummy.sensor_base_transform = lambda: None
+        with patch.dict(Daemon.handle.__globals__,
+                        {"save_plugin_setting": lambda *_: self.fail("must not write on failure")}):
+            result = Daemon.handle(dummy, {"cmd": "rotate", "arg": "align-auto"})
+        self.assertFalse(result["ok"])
+        self.assertTrue(dummy.rotation_locked)
+        self.assertEqual(dummy.transform, 3)
 
     def test_auto_rotation_scope(self):
         dummy = DummyDaemon()
