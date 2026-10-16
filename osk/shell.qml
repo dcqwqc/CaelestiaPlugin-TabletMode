@@ -1,22 +1,6 @@
-// Bottom-left on-screen-keyboard handle.
-//
-// Why this exists at all: the natural gesture for the keyboard is a swipe up
-// from the bottom-left, and hyprgrass cannot express it. Its edge binds match
-// on an edge *bitmask* only (Gestures.cpp find_swipe_edges), never on where
-// along the edge the swipe started, and its Lua API rejects a combined origin
-// outright (main.cpp: "expected a single direction"). So the whole bottom edge
-// is the smallest thing it can bind -- and that edge already belongs to
-// Caelestia: the launcher owns the centre, utilities the right corner.
-//
-// Caelestia does the region test itself, in QML, because it can (Interactions
-// .qml: inBottomPanel + withinPanelWidth). This does the same thing: a small
-// layer-shell strip that occupies exactly the dead space at the bottom-left,
-// on the overlay layer so it sits above caelestia-drawers (which is on top).
-//
-// The daemon owns its lifetime. The separate edge strip exists only while the
-// keyboard is closed, where swiping up opens it. Once the keyboard is visible,
-// the close grabber moves into the toolbar header itself, so no floating strip
-// sits awkwardly between the application and the keyboard.
+// Keyboard utilities and clipboard/emoji pager for TabletMode.
+// No keyboard grab handles or edge hit zones are created.
+// Use Super+O or existing OSK commands to toggle the keyboard.
 
 import QtQuick
 import Quickshell
@@ -222,42 +206,13 @@ ShellRoot {
     readonly property real normalLeftMargin: envNum("YOGA_HANDLE_LEFT", 68)
     property bool fullscreenChromeHidden: false
     readonly property real leftMargin: fullscreenChromeHidden ? 0 : normalLeftMargin
-    readonly property real barWidth: envNum("YOGA_HANDLE_WIDTH", 190)
-    readonly property real barHeight: envNum("YOGA_HANDLE_HEIGHT", 26)
+    // Resolve screen independently of the removed opening handle window.
+    readonly property var oskScreen: Quickshell.screens.find(s => s.name === root.output) ?? null
 
-    readonly property color grabColour: envStr("YOGA_HANDLE_COLOUR", "#c8c5d0")
-    readonly property color grabActiveColour: envStr("YOGA_HANDLE_COLOUR_ACTIVE", "#e6e0e9")
-
-    // A swipe this far counts; anything shorter is treated as a tap. Both do
-    // the same thing, so this only decides how early it fires.
-    readonly property real dragThreshold: envNum("YOGA_HANDLE_THRESHOLD", 18)
-    property bool closeGrabberArmed: false
-
-    function triggerCloseGrabber(): void {
-        if (root.closeGrabberArmed || !root.closing)
-            return;
-        root.closeGrabberArmed = true;
-        Quickshell.execDetached([root.tabletBin, "osk", "hide"]);
-        closeGrabberDisarm.restart();
-    }
-
-    Timer {
-        id: closeGrabberDisarm
-        interval: 700
-        onTriggered: root.closeGrabberArmed = false
-    }
-
-    // The first native wvkbd row is intentionally blank and becomes this
-    // Gboard-style utility row. The auxiliary panes occupy the rest of the
-    // keyboard footprint and fully cover the native keys without stopping them.
-    readonly property bool toolbarEnabled: envStr("YOGA_TOOLBAR_ENABLED", "1") === "1"
-    readonly property bool toolbarVisible: toolbarEnabled
-        && (closing || motionAnimating || motionInset > 0.5)
-    property bool furnitureReady: false
     readonly property bool toolbarRaised: toolbarVisible && furnitureReady
     readonly property bool clipboardEnabled: envStr("YOGA_CLIPBOARD_ENABLED", "1") === "1"
     readonly property real oskPadding: envNum("YOGA_OSK_PADDING", 8)
-    readonly property int keyboardRows: (win.screen !== null && win.screen.height > win.screen.width) ? 6 : 5
+    readonly property int keyboardRows: (root.oskScreen !== null && root.oskScreen.height > root.oskScreen.width) ? 6 : 5
     readonly property real toolbarRowWeight: 0.62
     readonly property real toolbarReferenceBottom: effectiveBottom > 0
         ? effectiveBottom
@@ -593,7 +548,7 @@ ShellRoot {
         // transparent at the bottom while the keyboard is closed, then moves
         // vertically with the OSK instead of receiving Hyprland's layer-in slide.
         visible: root.toolbarEnabled
-        screen: win.screen
+        screen: root.oskScreen
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.namespace: "yoga-osk-toolbar"
         WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
@@ -621,81 +576,9 @@ ShellRoot {
         }
 
         Item {
-            id: closeGrabberHitbox
-
-            visible: root.toolbarRaised
-            // Match the opening handle's exact horizontal geometry. The toolbar
-            // itself already starts at leftMargin, so this barWidth-wide hitbox
-            // has the same absolute x origin as the bottom-left opening handle.
-            anchors.left: parent.left
-            anchors.top: parent.top
-            anchors.topMargin: 2
-            width: root.barWidth
-            height: 18
-            z: 5
-
-            property real pressY: 0
-            property bool fired: false
-
-            Rectangle {
-                anchors.horizontalCenter: parent.horizontalCenter
-                anchors.top: parent.top
-                anchors.topMargin: 5
-                // Same visible pill geometry as the opening handle.
-                width: closeGrabberArea.pressed
-                    ? root.barWidth * 0.7
-                    : root.barWidth * 0.55
-                height: closeGrabberArea.pressed ? 6 : 5
-                radius: height / 2
-                color: closeGrabberArea.pressed
-                    ? root.grabActiveColour
-                    : root.grabColour
-                opacity: closeGrabberArea.pressed ? 1 : 0.65
-
-                Behavior on width {
-                    NumberAnimation {
-                        duration: 150
-                        easing.type: Easing.OutCubic
-                    }
-                }
-                Behavior on height {
-                    NumberAnimation {
-                        duration: 150
-                        easing.type: Easing.OutCubic
-                    }
-                }
-                Behavior on opacity {
-                    NumberAnimation { duration: 150 }
-                }
-            }
-
-            MouseArea {
-                id: closeGrabberArea
-                anchors.fill: parent
-
-                onPressed: event => {
-                    closeGrabberHitbox.pressY = event.y;
-                    closeGrabberHitbox.fired = false;
-                }
-                onPositionChanged: event => {
-                    if (!pressed || closeGrabberHitbox.fired)
-                        return;
-                    if (event.y - closeGrabberHitbox.pressY >= root.dragThreshold) {
-                        closeGrabberHitbox.fired = true;
-                        root.triggerCloseGrabber();
-                    }
-                }
-                onReleased: {
-                    if (!closeGrabberHitbox.fired)
-                        root.triggerCloseGrabber();
-                }
-            }
-        }
-
-        Item {
             id: toolbarDeck
             anchors.centerIn: parent
-            anchors.verticalCenterOffset: 6
+            anchors.verticalCenterOffset: 0
             width: toolbarRow.implicitWidth
             height: root.toolbarButtonHeight
             opacity: root.toolbarRaised ? 1 : 0
@@ -1262,7 +1145,7 @@ ShellRoot {
     PanelWindow {
         id: auxiliaryPane
         visible: root.toolbarVisible
-        screen: win.screen
+        screen: root.oskScreen
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.namespace: "yoga-osk-pager"
         WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
@@ -1334,111 +1217,6 @@ ShellRoot {
                     easing.type: Easing.OutCubic
                 }
             }
-        }
-    }
-
-
-
-    PanelWindow {
-        id: win
-        // This separate surface is now opening-only. Once the keyboard starts
-        // moving, the close affordance lives inside the toolbar header.
-        visible: !root.closing && !root.motionAnimating && root.motionInset <= 0.5
-
-        screen: {
-            if (root.output === "")
-                return null;
-            for (const s of Quickshell.screens)
-                if (s.name === root.output)
-                    return s;
-            return null;
-        }
-
-        WlrLayershell.layer: WlrLayer.Overlay
-        WlrLayershell.namespace: "yoga-osk-handle"
-        WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
-
-        anchors.left: true
-        anchors.bottom: true
-        margins.left: root.leftMargin
-        margins.bottom: root.motionInset
-
-        implicitWidth: root.barWidth
-        implicitHeight: root.barHeight
-
-        exclusionMode: ExclusionMode.Ignore
-        color: "transparent"
-
-        property bool armed: false
-
-        function trigger(): void {
-            if (win.armed)
-                return;
-            win.armed = true;
-            Quickshell.execDetached([root.tabletBin, "osk", "show"]);
-            disarm.restart();
-        }
-
-        Timer {
-            id: disarm
-
-            interval: 700
-            onTriggered: win.armed = false
-        }
-
-        Rectangle {
-            id: grab
-
-            anchors.horizontalCenter: parent.horizontalCenter
-            // Opening-only edge handle. Closing lives in the toolbar header.
-            anchors.bottom: parent.bottom
-            anchors.bottomMargin: 7
-
-            width: area.pressed ? parent.width * 0.7 : parent.width * 0.55
-            height: area.pressed ? 6 : 5
-            radius: height / 2
-            color: area.pressed ? root.grabActiveColour : root.grabColour
-            opacity: area.pressed ? 1 : 0.65
-
-            Behavior on width {
-                NumberAnimation {
-                    duration: 150
-                    easing.type: Easing.OutCubic
-                }
-            }
-            Behavior on height {
-                NumberAnimation {
-                    duration: 150
-                    easing.type: Easing.OutCubic
-                }
-            }
-            Behavior on opacity {
-                NumberAnimation {
-                    duration: 150
-                }
-            }
-        }
-
-        MouseArea {
-            id: area
-
-            anchors.fill: parent
-
-            property real pressY
-
-            onPressed: event => pressY = event.y
-            // Fires as soon as the swipe is long enough, so the keyboard is
-            // already moving while the finger still is.
-            onPositionChanged: event => {
-                if (!pressed)
-                    return;
-                const travelled = pressY - event.y;
-                if (travelled >= root.dragThreshold)
-                    win.trigger();
-            }
-            // A plain tap works too -- the strip is small and deliberate
-            // enough that touching it can only mean one thing.
-            onReleased: win.trigger()
         }
     }
 }
