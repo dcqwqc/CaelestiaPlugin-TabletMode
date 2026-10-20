@@ -49,6 +49,21 @@ Caelestia update changes the expected interaction hooks.
 
 The historical helper executable is named `yoga-tablet`, and older installations may have state under `~/.config/yoga-tablet`. Those names are retained for compatibility only; the plugin is not restricted to Lenovo Yoga hardware.
 
+## Lenovo Yoga 7 2-in-1 14IML9 sensor fallback
+
+On model 83DJ, Linux may expose a frozen standard accelerometer while the live
+BMA422 samples remain in the Intel ISH vendor HID collection. TabletMode uses
+that live report automatically when available and otherwise retains the normal
+iio-sensor-proxy and sysfs paths. Install `hid-tools`, then install the supplied
+udev rule once so the user service can read the sensor:
+
+    sudo install -Dm644 udev/99-mira-ish-hidraw.rules /etc/udev/rules.d/99-mira-ish-hidraw.rules
+    sudo udevadm control --reload-rules
+    sudo udevadm trigger --subsystem-match=hidraw
+
+Log out and back in after adding your user to the `input` group if it is not
+already a member. A BIOS update is not required for this fallback.
+
 ## Configuration
 
 Use the Caelestia Plugins page for rotation thresholds, auto-rotation policy, on-screen keyboard options, and folded-input policy. **Auto rotation scope** has three modes: always follows the live sensor in both laptop and tablet mode, tablet follows it only while folded, and never disables automatic rotation. The Rotation quick control is permanently split: the left side toggles accelerometer-driven rotation on/off without changing the current angle when locking, while each tap on the right side forces the next 90-degree orientation and holds it. Display and touchscreen/pen transforms are updated together. Relative motion from only udev-integrated touchpads is then rotated inside Hyprland after libinput, because many laptop touchpads (including Mirai's ELAN device) expose neither libinput rotation nor a calibration matrix. External USB/Bluetooth/virtual pointers are intentionally excluded. A specific monitor can be selected where automatic internal-panel detection is not suitable.
