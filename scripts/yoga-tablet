@@ -1498,6 +1498,122 @@ class Accelerometer:
 
 
 
+class HidBmaAccelerometer:
+    """Lenovo's live base accelerometer hidden in a vendor HID report.
+
+    The Yoga 7 14IML9 firmware advertises a standard LIS2DWL accelerometer,
+    but its samples remain frozen under Linux.  The same ISH collection also
+    contains a BMA422 whose three axes are carried in Custom Value 1/2/3 of
+    report 2.  Powering that report and decoding it here provides the live
+    gravity vector used by Windows on this hardware.
+    """
+
+    REPORT_ID = 2
+    REPORT_LEN = 41
+    SCALE_TO_G = 980665.0
+
+    def __init__(self):
+        self.path: Path | None = None
+        self.fd: int | None = None
+        self.sample: tuple[float, float, float] | None = None
+        self.sample_time = 0.0
+        self.last_discovery = 0.0
+        self.rediscover()
+
+    @staticmethod
+    def supported_machine() -> bool:
+        try:
+            vendor = Path("/sys/class/dmi/id/sys_vendor").read_text().strip().upper()
+            product = Path("/sys/class/dmi/id/product_name").read_text().strip().upper()
+        except OSError:
+            return False
+        return vendor == "LENOVO" and product == "83DJ"
+
+    @staticmethod
+    def _find() -> Path | None:
+        if not HidBmaAccelerometer.supported_machine():
+            return None
+        matches: list[tuple[int, Path]] = []
+        for node in sorted(Path("/sys/class/hidraw").glob("hidraw*")):
+            try:
+                uevent = (node / "device/uevent").read_text()
+                descriptor = (node / "device/report_descriptor").read_bytes()
+            except OSError:
+                continue
+            if "HID_ID=001F:00008087:00000AC2" not in uevent:
+                continue
+            # The sensor collection containing the BMA422 has eight reports
+            # and is much larger than the companion orientation collection.
+            if b"\x85\x06" in descriptor and len(descriptor) > 2000:
+                matches.append((len(descriptor), Path("/dev") / node.name))
+        return max(matches, default=(0, None))[1]
+
+    def close(self) -> None:
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+        self.fd = None
+        self.path = None
+
+    def rediscover(self) -> None:
+        self.last_discovery = time.monotonic()
+        self.close()
+        path = self._find()
+        if path is None:
+            return
+        try:
+            # Report 2 is off by default because Linux treats it as an unknown
+            # custom sensor.  Enable all events at D0 with a 100 ms interval.
+            enabled = subprocess.run(
+                [
+                    "hid-feature", "set",
+                    "-f", "20000", "2",
+                    "-f", "20003", "2",
+                    "-f", "20005", "100",
+                    str(path),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+                check=False,
+            )
+            if enabled.returncode != 0:
+                return
+            self.fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            self.path = path
+        except (OSError, subprocess.SubprocessError):
+            self.close()
+
+    def read_g(self) -> tuple[float, float, float] | None:
+        if self.fd is None:
+            if time.monotonic() - self.last_discovery >= 2.0:
+                self.rediscover()
+            if self.fd is None:
+                return None
+        try:
+            while True:
+                report = os.read(self.fd, 4096)
+                if len(report) >= self.REPORT_LEN and report[0] == self.REPORT_ID:
+                    axes = tuple(
+                        int.from_bytes(report[start:start + 4], "little", signed=True)
+                        / self.SCALE_TO_G
+                        for start in (27, 31, 35)
+                    )
+                    self.sample = axes  # type: ignore[assignment]
+                    self.sample_time = time.monotonic()
+        except BlockingIOError:
+            pass
+        except OSError:
+            self.close()
+            return None
+        if self.sample is not None and time.monotonic() - self.sample_time <= 2.0:
+            return self.sample
+        return None
+
+
+
 class SensorProxy:
     """Live orientation bridge backed by iio-sensor-proxy."""
 
@@ -1554,6 +1670,7 @@ class Daemon:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.accel = Accelerometer(cfg)
+        self.bma_accel = HidBmaAccelerometer()
         self.sensor_proxy = SensorProxy()
         self.sensor_source = "starting"
         self.proxy_orientation: str | None = None
@@ -1863,12 +1980,32 @@ class Daemon:
                 orientation = "left-up"
         return orientation
 
+    def orientation_from_bma(self, g: tuple[float, float, float]) -> str:
+        """Interpret the base sensor, including ordinary laptop posture.
+
+        When Mira is unfolded on a desk, the base accelerometer is face-up and
+        has no in-plane gravity component.  In that posture the panel's only
+        useful orientation is normal landscape; preserving the last tablet
+        angle would leave the desktop stuck in portrait after unfolding.
+        A folded tablet may legitimately be laid flat, so retain its previous
+        orientation while tablet mode is active.
+        """
+        x, y, z = g
+        threshold = float(self.cfg.get("threshold_g", 0.55))
+        flat = float(self.cfg.get("flat_threshold_g", 0.80))
+        if not self.tablet_mode and z > flat and abs(x) < threshold and abs(y) < threshold:
+            return "normal"
+        return self.orientation_from(g)
+
     def sensor_base_transform(self) -> int | None:
         """Read an uncalibrated absolute sensor direction for user alignment.
 
         Never infer a new calibration from the previously applied output:
         otherwise the old incorrect transform becomes its own reference.
         """
+        g = self.bma_accel.read_g()
+        if g is not None:
+            return ORIENTATION_TRANSFORM[self.orientation_from(g, calibrated=False)]
         proxy = self.sensor_proxy.read()
         if proxy in ORIENTATION_TRANSFORM:
             return ORIENTATION_TRANSFORM[proxy]
@@ -1906,23 +2043,30 @@ class Daemon:
 
     def sample_orientation(self) -> str:
         """Refresh orientation synchronously for user-triggered unlocks."""
-        proxy = self.sensor_proxy.read()
-        if proxy is not None:
-            self.sensor_source = "iio-sensor-proxy"
-            self.proxy_orientation = proxy
-            self.orientation = self.orientation_from_proxy(proxy)
+        g = self.bma_accel.read_g()
+        if g is not None:
+            self.sensor_source = "hid-bma422"
+            self.proxy_orientation = None
+            self.orientation = self.orientation_from_bma(g)
             self._orientation_sampled = True
         else:
-            self.sensor_source = "sysfs-fallback"
-            if self.accel.base is None:
-                self.accel.rediscover()
-            g = self.accel.read_g()
-            if g is None:
-                self.accel.rediscover()
-                g = self.accel.read_g()
-            if g is not None:
-                self.orientation = self.orientation_from(g)
+            proxy = self.sensor_proxy.read()
+            if proxy is not None:
+                self.sensor_source = "iio-sensor-proxy"
+                self.proxy_orientation = proxy
+                self.orientation = self.orientation_from_proxy(proxy)
                 self._orientation_sampled = True
+            else:
+                self.sensor_source = "sysfs-fallback"
+                if self.accel.base is None:
+                    self.accel.rediscover()
+                g = self.accel.read_g()
+                if g is None:
+                    self.accel.rediscover()
+                    g = self.accel.read_g()
+                if g is not None:
+                    self.orientation = self.orientation_from(g)
+                    self._orientation_sampled = True
         self._candidate, self._candidate_hits = None, 0
         return self.orientation
 
@@ -1936,17 +2080,27 @@ class Daemon:
         next_reconcile = time.monotonic() + 2.0
 
         while not self.stopping.wait(interval):
-            proxy = self.sensor_proxy.read()
             candidate = None
+            bma_g = self.bma_accel.read_g()
 
-            if proxy is not None:
+            if bma_g is not None:
+                self.sensor_source = "hid-bma422"
+                self.proxy_orientation = None
+                candidate = self.orientation_from_bma(bma_g)
+                if not proxy_logged:
+                    log("using live BMA422 HID accelerometer")
+                    proxy_logged = True
+            else:
+                proxy = self.sensor_proxy.read()
+
+            if bma_g is None and proxy is not None:
                 self.sensor_source = "iio-sensor-proxy"
                 self.proxy_orientation = proxy
                 candidate = self.orientation_from_proxy(proxy)
                 if not proxy_logged:
                     log("using live iio-sensor-proxy orientation events")
                     proxy_logged = True
-            else:
+            elif bma_g is None:
                 self.sensor_source = "sysfs-fallback"
                 self.proxy_orientation = None
                 proxy_logged = False
