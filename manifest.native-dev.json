@@ -1,0 +1,30 @@
+{
+  "name": "TabletMode",
+  "version": "1.10.0",
+  "author": "dcqwqc",
+  "homepage": "https://github.com/dcqwqc/CaelestiaPlugin-TabletMode",
+  "icon": "tablet_android",
+  "description": "Convertible laptop support for Caelestia: live auto-rotation, synchronized touchscreen/pen/internal-touchpad motion, plugin-owned Ghostty direct-touch scrolling with inertia, searchable Gboard-style keyboard, compact portrait settings, and lock-screen blanking.",
+  "entryPoints": [
+    {
+      "type": "custom",
+      "source": "Main.qml"
+    },
+    {
+      "type": "quick-toggle",
+      "source": "toggles/TabletModeToggle.qml",
+      "properties": {
+        "name": "touchKeyboard"
+      }
+    },
+    {
+      "type": "quick-toggle",
+      "source": "toggles/RotationLockToggle.qml",
+      "properties": {
+        "name": "rotationLock"
+      }
+    }
+  ],
+  "settings": "Settings.qml",
+  "requires": ">=2.1.0"
+}
